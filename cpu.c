@@ -1,4 +1,3 @@
-#include <math.h>
 #include <stdio.h>
 #include "cpu.h"
 #include "test.h"
@@ -6,11 +5,13 @@
 #define TESTING
 #endif
 
+
 #define TICK(cpu, n)  ((cpu)->cycle += (n))
 #define SET_Z(cpu, n) ((cpu)->F.Z = ((n) == 0))
 #define SET_N(cpu, n) ((cpu)->F.N = (n))
 #define SET_H(cpu, n) ((cpu)->F.H = (n))
 #define SET_C(cpu, n) ((cpu)->F.C = (n))
+
 
 // 8-bit registers
 #define REG_B 0
@@ -31,6 +32,7 @@
 
 
 // helpers
+
 
 static inline u8 read8(registers_t *cpu, u16 addy) {
   return cpu->mem[addy];
@@ -291,7 +293,7 @@ static inline void ld_hlm_a(registers_t *cpu) {
 
 static inline void ld_a_hlp(registers_t *cpu) {
   u16 hl_addy = read_reg16(cpu, REG_HL);
-  u8 hl_val = read16(cpu, hl_addy);
+  u8 hl_val = read8(cpu, hl_addy);
 
   write_reg8(cpu, REG_A, hl_val);
   write_reg16(cpu, REG_HL, hl_addy + 1);
@@ -299,9 +301,35 @@ static inline void ld_a_hlp(registers_t *cpu) {
   TICK(cpu, 8);
 }
 
-static inline void inc_hl(registers_t *cpu) {
-  u16 hl = read_reg16(cpu, REG_HL);
+static inline void ld_a_hlm(registers_t *cpu) {
+  u16 hl_addy = read_reg16(cpu, REG_HL);
+  u8 hl_val = read8(cpu, hl_addy);
+
+  write_reg8(cpu, REG_A, hl_val);
+  write_reg16(cpu, REG_HL, hl_addy - 1);
+
+  TICK(cpu, 8);
 }
+
+static inline void ld_r_r(registers_t *cpu) {
+  //0b01xxxyyy
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int x = (opcode >> 3) & 7;
+  int y = opcode & 7;
+
+  printf("LD_r_r: opcode=%02X x=%d y=%d HL=%04X E=%02X mem[HL]=%02X\n",
+         opcode, x, y, cpu->HL, cpu->E, cpu->mem[cpu->HL]);
+  
+  u8 src = read_reg8(cpu, y);
+  write_reg8(cpu, x, src);
+  TICK(cpu, (x == REG_HLm || y == REG_HLm) ? 8 : 4);
+}
+
+static inline void halt() {
+  // todo 
+  printf("one");
+}
+
 
 // rotates
 static inline void rlca(registers_t *cpu) {
@@ -445,6 +473,13 @@ static inline void daa(registers_t *cpu) {
   TICK(cpu, 4);
 }
 
+static inline void scf(registers_t *cpu) {
+  SET_C(cpu, 1);
+  SET_N(cpu, 0);
+  SET_H(cpu, 0);
+  TICK(cpu, 4);
+}
+
 // jumps
 static inline void jr_e(registers_t *cpu) {
   int8_t offset = (int8_t)fetch8(cpu);
@@ -483,6 +518,22 @@ static inline void jr_nc(registers_t *cpu) {
   }
 }
 
+static inline void jr_c(registers_t *cpu) {
+  int8_t offset = (int8_t)fetch8(cpu);
+  if (cpu->F.C) {
+    cpu->PC += offset;
+    TICK(cpu, 12);
+  } else {
+    TICK(cpu, 8);
+  }
+}
+
+static inline void ccf(registers_t *cpu) {
+  SET_C(cpu, !cpu->F.C);
+  SET_N(cpu, 0);
+  SET_H(cpu, 0);
+}
+
 
 void (*opcodes[256])(registers_t *cpu) = {
   nop, ld_rr_immediate, ld_bc_a, inc_rr, inc_r, dec_r, ld_r_immediate, rlca,
@@ -491,7 +542,16 @@ void (*opcodes[256])(registers_t *cpu) = {
   jr_e, add_hl_rr, ld_a_de, dec_rr, inc_r, dec_r, ld_r_immediate, rra, 
   jr_nz, ld_rr_immediate, ld_hlp_a, inc_rr, inc_r, dec_r, ld_r_immediate, daa,
   jr_z, ld_rr_immediate, ld_a_hlp, dec_rr, inc_r, dec_r, ld_r_immediate, cpl,
-  jr_nc, ld_rr_immediate, ld_hlm_a, inc_rr, inc_hl, 
+  jr_nc, ld_rr_immediate, ld_hlm_a, inc_rr, inc_r, dec_r, ld_r_immediate, scf,
+  jr_c, add_hl_rr, ld_a_hlm, dec_rr, inc_r, dec_r, ld_r_immediate, ccf,
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, // 0x40–0x47
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, // 0x48–0x4F
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, // 0x50–0x57
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r,   ld_r_r, // 0x58–0x5F
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, // 0x60–0x67
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, // 0x68–0x6F
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, halt, ld_r_r, // 0x70–0x77
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, // 0x78–0x7F
 };
 
 void cpu_go(registers_t *cpu) {

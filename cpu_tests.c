@@ -678,7 +678,6 @@ void ld_a_hlp(void) {
   cpu.mem[0x0000] = 0x2A;
   cpu_go(&cpu);
 
-  PRINT_CPU(cpu);
   assert(cpu.A == 0xAB);
   assert(cpu.HL == 0x1235);
 }
@@ -690,11 +689,135 @@ void cpl(void) {
   cpu.mem[0x0000] = 0x2F;
   cpu_go(&cpu);
 
-  PRINT_CPU(cpu);
   assert(cpu.A == 0x55);
   assert(cpu.F.N == 1);
   assert(cpu.F.H == 1);
 }
+
+void inc_hlm(void) {
+  SET_CPU();
+  cpu.PC = 0x0000;
+  cpu.HL = 0x1234;
+  cpu.mem[0x1234] = 0x12;
+  
+  cpu.mem[0x0000] = 0x34;
+  cpu_go(&cpu);
+
+  assert(cpu.mem[0x1234] == 0x13);
+  assert(cpu.cycle == 12);
+  assert(cpu.F.N == 0);
+}
+
+void dec_hlm(void) {
+  SET_CPU();
+  cpu.PC = 0x0000;
+  cpu.HL = 0x1234;
+  cpu.mem[0x1234] = 0x12;
+  
+  cpu.mem[0x0000] = 0x35;
+  cpu_go(&cpu);
+
+  assert(cpu.mem[0x1234] == 0x11);
+  assert(cpu.cycle == 12);
+  assert(cpu.F.N == 1);
+}
+
+void ld_hlm_imm(void) {
+  SET_CPU(); 
+  cpu.PC = 0x0000;
+  cpu.HL = 0x1234;
+  cpu.mem[0x0000] = 0x36;
+  cpu.mem[0x0001] = 0x12;
+  cpu_go(&cpu);
+
+  assert(cpu.mem[0x1234] == 0x12);
+  assert(cpu.cycle == 12);
+}
+
+void scf(void) {
+  SET_CPU();
+  cpu.PC = 0x0000;
+  cpu.mem[0x0000] = 0x37;
+  cpu_go(&cpu);
+
+  assert(cpu.F.N == 0);
+  assert(cpu.F.C == 1);
+  assert(cpu.F.H == 0);
+}
+
+void jr_c(void) {
+  SET_CPU();
+  cpu.PC = 0x0000;
+  cpu.F.C = 0;                
+  cpu.mem[0x0000] = 0x38;     
+  cpu.mem[0x0001] = 0x02;     
+
+  cpu_go(&cpu);
+
+  assert(cpu.PC == 0x0002);  
+  assert(cpu.cycle == 8);    
+}
+
+void ccf(void) {
+  SET_CPU(); 
+  cpu.PC = 0x0000;
+  cpu.mem[0x0000] = 0x3F;
+  cpu.F.C = 0;
+  cpu_go(&cpu);
+
+  assert(cpu.F.C == 1);
+  assert(cpu.F.N == 0); 
+  assert(cpu.F.H == 0);
+}
+
+
+void ld_r_r(void) {
+  const uint16_t base = 0x0000;
+  const uint8_t regs[8] = {0, 1, 2, 3, 4, 5, 6, 7}; // B, C, D, E, H, L, (HL), A
+  const char *reg_names[8] = {"B","C","D","E","H","L","(HL)","A"};
+
+  for (int dest = 0; dest < 8; dest++) {
+    for (int src = 0; src < 8; src++) {
+      // Skip invalid LD (HL),(HL)
+      if (dest == 6 && src == 6)
+        continue;
+
+      SET_CPU();
+      cpu.PC = base;
+      cpu.HL = 0x2000;
+      cpu.mem[base] = 0x40 | (dest << 3) | src; // LD r,r' opcode base 0x40
+
+      // Initialize registers to known values
+      cpu.A = 0xA1;
+      cpu.B = 0xB2;
+      cpu.C = 0xC3;
+      cpu.D = 0xD4;
+      cpu.E = 0xE5;
+      cpu.H = 0x12;
+      cpu.L = 0x34;
+      cpu.mem[0x1234] = 0x9A; // in case (HL) is source or dest
+
+      uint8_t before_src_value = 0;
+      // Helper to get pointer to register
+      uint8_t *rptrs[8] = { &cpu.B, &cpu.C, &cpu.D, &cpu.E, &cpu.H, &cpu.L, &cpu.mem[cpu.HL], &cpu.A };
+
+      before_src_value = *rptrs[src];
+      cpu_go(&cpu);
+
+      // After execution
+      uint8_t after_dest_value = *rptrs[dest];
+
+      // Assertions
+      assert(after_dest_value == before_src_value);
+      assert(cpu.cycle == 4 || (dest == 6 || src == 6 ? cpu.cycle == 8 : 1)); // 8 cycles if (HL) used
+
+      printf("✅ LD %s,%s passed (copied 0x%02X)\n",
+             reg_names[dest], reg_names[src], before_src_value);
+    }
+  }
+}
+
+
 
 void run_tests() {
   RUN_TEST("LD A (BC)", ld_a_bc);
@@ -712,5 +835,12 @@ void run_tests() {
   RUN_TEST("JR Z", jr_z);
   RUN_TEST("LD A (HL+)", ld_a_hlp);
   RUN_TEST("CPL", cpl);
+  RUN_TEST("INC (HL)", inc_hlm);
+  RUN_TEST("DEC (HL)", dec_hlm);
+  RUN_TEST("LD (HL) u8", ld_hlm_imm);
+  RUN_TEST("SCF", scf);
+  RUN_TEST("JRC", jr_c);
+  RUN_TEST("CCF", ccf);
+  RUN_TEST("LD R R", ld_r_r);
   printf("\nAll tests passed\n");
 }

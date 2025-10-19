@@ -8,8 +8,8 @@ typedef uint8_t u8;
 #define REGISTER(A, B) 	\
   union { 		\
     struct {		\
-      u8 A;		\
       u8 B;		\
+      u8 A;		\
     };			\
     u16 A##B;		\
   }			\
