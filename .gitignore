@@ -1,2 +1,10 @@
-emulator 
+emulator
 tests
+
+*.o
+*.out
+*.exe
+*.a
+*.so
+
+

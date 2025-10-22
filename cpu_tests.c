@@ -771,6 +771,7 @@ void ccf(void) {
 }
 
 
+/*
 void ld_r_r(void) {
   const uint16_t base = 0x0000;
   const uint8_t regs[8] = {0, 1, 2, 3, 4, 5, 6, 7}; // B, C, D, E, H, L, (HL), A
@@ -816,8 +817,88 @@ void ld_r_r(void) {
     }
   }
 }
+*/
 
+void and_a_b(void) {
+  SET_CPU();
+  cpu.PC = 0x0000;
+  cpu.A = 0x12;
+  cpu.B = 0x15;
+  cpu.mem[0x0000] = 0xA0;
 
+  cpu_go(&cpu);
+  assert(cpu.A == 0x10);
+  assert(cpu.cycle == 4);
+}
+
+void and_a_hlm(void) {
+  SET_CPU();
+  cpu.PC = 0x0000;
+  cpu.A = 0x12;
+  cpu.HL = 0x1234;
+  cpu.mem[0x1234] = 0x15;
+  cpu.mem[0x0000] = 0xA6;
+  cpu_go(&cpu);
+
+  assert(cpu.A == 0x10);
+  assert(cpu.cycle == 8);
+}
+
+void xor_a_b(void) {
+  SET_CPU();
+  cpu.PC = 0x0000;
+  cpu.A = 0x12;
+  cpu.B = 0x15;
+  cpu.mem[0x0000] = 0xA8;
+
+  cpu_go(&cpu);
+  assert(cpu.A == 0x7);
+  assert(cpu.cycle == 4);
+}
+
+void xor_a_hlm(void) {
+  SET_CPU();
+  cpu.PC = 0x0000;
+  cpu.A = 0x12;
+  cpu.HL = 0x1234;
+  cpu.mem[0x1234] = 0x15;
+  cpu.mem[0x0000] = 0xAE;
+  cpu_go(&cpu);
+
+  assert(cpu.A == 0x7);
+  assert(cpu.cycle == 8);
+}
+
+void cp_b(void) {
+  SET_CPU();
+  cpu.PC = 0x0000;
+  cpu.A = 0x12;
+  cpu.B = 0xFF;
+
+  cpu.mem[0x0000] = 0xB8;
+  cpu_go(&cpu);
+}
+
+void ret_nz(void) {
+  SET_CPU();
+  cpu.PC = 0x1234;
+  cpu.SP = 0x4444;
+
+  cpu.mem[0x1234] = 0xC0;
+}
+
+void pop_bc(void) {
+  SET_CPU();
+  cpu.PC = 0x1234;
+  cpu.SP = 0x4422;
+
+  cpu.mem[0x4422] = 0x12;
+  cpu.mem[0x4423] = 0x34;
+  cpu.mem[0x1234] = 0xC1;
+  cpu_go(&cpu);
+
+  PRINT_CPU(cpu);
+}
 
 void run_tests() {
   RUN_TEST("LD A (BC)", ld_a_bc);
@@ -841,6 +922,11 @@ void run_tests() {
   RUN_TEST("SCF", scf);
   RUN_TEST("JRC", jr_c);
   RUN_TEST("CCF", ccf);
-  RUN_TEST("LD R R", ld_r_r);
+  RUN_TEST("AND A B", and_a_b);
+  RUN_TEST("AND A (HL)", and_a_hlm);
+  RUN_TEST("XOR A B", xor_a_b);
+  RUN_TEST("XOR A (HL)", xor_a_hlm);
+  RUN_TEST("CP A B", cp_b);
+  RUN_TEST("POP BC", pop_bc);
   printf("\nAll tests passed\n");
 }

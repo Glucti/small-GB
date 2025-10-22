@@ -32,8 +32,6 @@
 
 
 // helpers
-
-
 static inline u8 read8(registers_t *cpu, u16 addy) {
   return cpu->mem[addy];
 }
@@ -414,6 +412,40 @@ static inline void add_r_r(registers_t *cpu) {
   TICK(cpu, (reg == REG_HLm) ? 8 : 4);
 }
 
+static inline void sub_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = opcode & 7;
+
+  u8 a = read_reg8(cpu, REG_A);
+  u8 r = read_reg8(cpu, reg);
+  u16 result = a - r;
+
+  SET_N(cpu, 1);
+  SET_Z(cpu, (result & 0xFF));
+  SET_H(cpu, (a & 0x0F) < (r & 0x0F));
+  SET_C(cpu, (a < r));
+  write_reg8(cpu, REG_A, result);
+  TICK(cpu, (reg == REG_HLm) ? 8 : 4);
+}
+
+
+static inline void sbc_r(registers_t *cpu) { 
+  u8 opcode = read8(cpu, cpu->PC - 1); 
+  int reg = opcode & 7; 
+  u8 a = read_reg8(cpu, REG_A); 
+  u8 r = read_reg8(cpu, reg); 
+  u16 result = a - r - cpu->F.C; 
+
+  SET_Z(cpu, (result & 0xFF)); 
+  SET_N(cpu, 1); 
+  SET_H(cpu, ((a & 0x0F) < (r & 0x0F))); 
+  SET_C(cpu, (a < r)); 
+
+  write_reg8(cpu, REG_A, (u8)result); 
+
+  TICK(cpu, (reg == REG_HLm) ? 8 : 4); 
+}
+
 static inline void adc_r(registers_t *cpu) {
 
   u8 opcode = read8(cpu, cpu->PC - 1);
@@ -480,6 +512,22 @@ static inline void scf(registers_t *cpu) {
   TICK(cpu, 4);
 }
 
+static inline void cp_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = opcode & 7;
+
+  u8 a = read_reg8(cpu, REG_A);
+  u8 r = read_reg8(cpu, reg);
+  u16 result = a - r;
+
+  SET_N(cpu, 1);
+  SET_Z(cpu, (result & 0xFF));
+  SET_H(cpu, (a & 0x0F) < (r & 0x0F));
+  SET_C(cpu, (a < r));
+  write_reg8(cpu, REG_A, result);
+  TICK(cpu, (reg == REG_HLm) ? 8 : 4);
+}
+
 // jumps
 static inline void jr_e(registers_t *cpu) {
   int8_t offset = (int8_t)fetch8(cpu);
@@ -528,10 +576,131 @@ static inline void jr_c(registers_t *cpu) {
   }
 }
 
+static inline void jp_nz_a16(registers_t *cpu) {
+  u16 next = read16(cpu, cpu->PC + 1);
+  
+  if (!cpu->F.Z) {
+    cpu->PC = next;
+    TICK(cpu, 16);
+  } else {
+    cpu->PC += 3; // skip
+    TICK(cpu, 12);
+  }
+}
+
+static inline void jp_a16(registers_t *cpu) {
+  u16 next = read16(cpu, cpu->PC + 1);
+  cpu->PC = next;
+  TICK(cpu, 16);
+}
+
 static inline void ccf(registers_t *cpu) {
   SET_C(cpu, !cpu->F.C);
   SET_N(cpu, 0);
   SET_H(cpu, 0);
+}
+
+//bit ops
+static inline void and_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = opcode & 7;
+  u8 a = read_reg8(cpu, REG_A);
+  u8 r = read_reg8(cpu, reg);
+
+  u8 result = a & r;
+  SET_Z(cpu, result);
+  SET_N(cpu, 0);
+  SET_H(cpu, 1);
+  SET_C(cpu, 0);
+
+  write_reg8(cpu, REG_A, result);
+  TICK(cpu, (reg == REG_HLm) ? 8 : 4);
+}
+
+static inline void xor_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = opcode & 7;
+  u8 a = read_reg8(cpu, REG_A);
+  u8 r = read_reg8(cpu, reg);
+
+  u8 result = a ^ r;
+  SET_Z(cpu, result);
+  SET_N(cpu, 0);
+  SET_H(cpu, 0);
+  SET_C(cpu, 0);
+
+  write_reg8(cpu, REG_A, result);
+  TICK(cpu, (reg == REG_HLm) ? 8 : 4);
+}
+
+static inline void or_r(registers_t *cpu) { /* untested */
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = opcode & 7;
+  u8 a = read_reg8(cpu, REG_A);
+  u8 r = read_reg8(cpu, reg);
+
+  u8 result = a | r;
+  SET_Z(cpu, result);
+  SET_N(cpu, 0);
+  SET_H(cpu, 0);
+  SET_C(cpu, 0);
+
+  write_reg8(cpu, REG_A, result);
+  TICK(cpu, (reg == REG_HLm) ? 8 : 4);
+}
+
+static inline void ret_nz(registers_t *cpu) {
+  u16 pc = read16(cpu, cpu->PC); // already incremented PC
+  if (!cpu->F.Z) {
+    u8 lsb = read8(cpu, cpu->SP++);
+    u8 msb = read8(cpu, cpu->SP++);
+
+    u16 val = (msb << 8) | lsb;
+    write8(cpu, cpu->PC, val);
+    TICK(cpu, 20);
+  } else {
+    TICK(cpu, 8);
+  }
+}
+
+static inline u16 pop(registers_t *cpu) {
+  u8 lsb = read8(cpu, cpu->SP++);
+  u8 msb = read8(cpu, cpu->SP++);
+  return (msb << 8) | lsb;
+}
+
+static inline void push(registers_t *cpu, u16 val) {
+  cpu->SP--;
+  write8(cpu, cpu->SP, (u8)(val >> 8));
+  cpu->SP--;
+  write8(cpu, cpu->SP, (u8)val & 0xFF);
+}
+
+static inline void pop_rr(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = (opcode >> 4) & 3;
+  write_reg16(cpu, reg, pop(cpu));
+  TICK(cpu, 12);
+}
+
+static inline void push_rr(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = (opcode >> 4) & 3;
+  push(cpu, read_reg16(cpu, reg));
+  TICK(cpu, 16);
+}
+
+static inline void call_nz(registers_t *cpu) {
+ u16 next = read16(cpu, cpu->PC + 1);
+
+ if (!cpu->F.Z) {
+   push(cpu, cpu->PC+3);
+   cpu->PC = next;
+   TICK(cpu, 24);
+ } else {
+   cpu->PC += 3;
+   TICK(cpu, 12);
+ }
 }
 
 
@@ -544,14 +713,24 @@ void (*opcodes[256])(registers_t *cpu) = {
   jr_z, ld_rr_immediate, ld_a_hlp, dec_rr, inc_r, dec_r, ld_r_immediate, cpl,
   jr_nc, ld_rr_immediate, ld_hlm_a, inc_rr, inc_r, dec_r, ld_r_immediate, scf,
   jr_c, add_hl_rr, ld_a_hlm, dec_rr, inc_r, dec_r, ld_r_immediate, ccf,
-  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, // 0x40–0x47
-  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, // 0x48–0x4F
-  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, // 0x50–0x57
-  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r,   ld_r_r, // 0x58–0x5F
-  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, // 0x60–0x67
-  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, // 0x68–0x6F
-  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, halt, ld_r_r, // 0x70–0x77
-  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, // 0x78–0x7F
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, 
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, 
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, 
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r,   ld_r_r, 
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, 
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, 
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, halt, ld_r_r, 
+  ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, 
+								  
+  add_r_r, add_r_r, add_r_r, add_r_r, add_r_r, add_r_r, add_r_r, add_r_r,
+  adc_r, adc_r, adc_r, adc_r, adc_r, adc_r, adc_r, adc_r,
+  sub_r, sub_r, sub_r, sub_r, sub_r, sub_r, sub_r, sub_r, 
+  sbc_r, sbc_r, sbc_r, sbc_r, sbc_r, sbc_r, sbc_r, sbc_r,
+  and_r, and_r, and_r, and_r, and_r, and_r, and_r, and_r, 
+  xor_r, xor_r, xor_r, xor_r, xor_r, xor_r, xor_r, xor_r, 
+  or_r, or_r, or_r, or_r, or_r, or_r, or_r, or_r, 
+  cp_r, cp_r, cp_r, cp_r, cp_r, cp_r, cp_r, cp_r, 
+  ret_nz, pop_rr, jp_nz_a16, call_nz, push_rr 
 };
 
 void cpu_go(registers_t *cpu) {
