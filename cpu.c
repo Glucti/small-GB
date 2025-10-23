@@ -649,25 +649,36 @@ static inline void or_r(registers_t *cpu) { /* untested */
   TICK(cpu, (reg == REG_HLm) ? 8 : 4);
 }
 
-static inline void ret_nz(registers_t *cpu) {
-  u16 pc = read16(cpu, cpu->PC); // already incremented PC
-  if (!cpu->F.Z) {
-    u8 lsb = read8(cpu, cpu->SP++);
-    u8 msb = read8(cpu, cpu->SP++);
+static inline u16 pop(registers_t *cpu) {
+  u8 lsb = read8(cpu, cpu->SP++);
+  u8 msb = read8(cpu, cpu->SP++);
+  return (msb << 8) | lsb;
+}
 
-    u16 val = (msb << 8) | lsb;
-    write8(cpu, cpu->PC, val);
+static inline void ret_nz(registers_t *cpu) {
+  if (!cpu->F.Z) {
+    cpu->PC = pop(cpu);
     TICK(cpu, 20);
   } else {
     TICK(cpu, 8);
   }
 }
 
-static inline u16 pop(registers_t *cpu) {
-  u8 lsb = read8(cpu, cpu->SP++);
-  u8 msb = read8(cpu, cpu->SP++);
-  return (msb << 8) | lsb;
+static inline void ret_z(registers_t *cpu) {
+  if (cpu->F.Z) {
+    cpu->PC = pop(cpu);
+    TICK(cpu, 20);
+  } else {
+    TICK(cpu, 8);
+  }
 }
+
+static inline void ret(registers_t *cpu) {
+    cpu->PC = pop(cpu);
+    TICK(cpu, 16);
+}
+
+
 
 static inline void push(registers_t *cpu, u16 val) {
   cpu->SP--;
@@ -703,6 +714,31 @@ static inline void call_nz(registers_t *cpu) {
  }
 }
 
+static inline void add_a_imm(registers_t *cpu) {
+  u8 imm = fetch8(cpu);
+  u8 a = read_reg8(cpu, REG_A);
+  u8 result = a + imm;
+
+
+  SET_Z(cpu, result);
+  SET_N(cpu, 0);
+  SET_H(cpu, ((a & 0x0F) + (imm & 0x0F)) > 0x0F);
+  SET_C(cpu, (result > 0xFF));
+  write_reg8(cpu, REG_A, result);
+  TICK(cpu, 8);
+}
+
+static inline void rst(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  u8 n = (opcode >> 3) & 7;
+
+  u16 addr = n << 3;
+  push(cpu, cpu->PC + 1);
+  cpu->PC = addr;
+
+  TICK(cpu, 16);
+}
+
 
 void (*opcodes[256])(registers_t *cpu) = {
   nop, ld_rr_immediate, ld_bc_a, inc_rr, inc_r, dec_r, ld_r_immediate, rlca,
@@ -730,7 +766,9 @@ void (*opcodes[256])(registers_t *cpu) = {
   xor_r, xor_r, xor_r, xor_r, xor_r, xor_r, xor_r, xor_r, 
   or_r, or_r, or_r, or_r, or_r, or_r, or_r, or_r, 
   cp_r, cp_r, cp_r, cp_r, cp_r, cp_r, cp_r, cp_r, 
-  ret_nz, pop_rr, jp_nz_a16, call_nz, push_rr 
+  ret_nz, pop_rr, jp_nz_a16, jp_a16, call_nz, push_rr, rst, ret_z, 
+  ret,
+  
 };
 
 void cpu_go(registers_t *cpu) {
