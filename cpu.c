@@ -30,6 +30,7 @@
 #define REG_SP 3
 
 
+void (*cb_ops[256])(registers_t *cpu);
 
 // helpers
 static inline u8 read8(registers_t *cpu, u16 addy) {
@@ -463,6 +464,20 @@ static inline void adc_r(registers_t *cpu) {
   TICK(cpu, (reg == REG_HLm) ? 8 : 4);
 }
 
+static inline void adc_u8(registers_t *cpu) {
+  u8 imm = fetch8(cpu);
+  u8 a = read_reg8(cpu, REG_A);
+  u16 result = imm + a + cpu->F.C;
+
+  SET_Z(cpu, (result & 0xFF));
+  SET_N(cpu, 0);
+  SET_H(cpu, ((a & 0x0F) + (imm & 0x0F) + cpu->F.C) > 0x0F);
+  SET_C(cpu, (result > 0xFF));
+  
+  write_reg8(cpu, REG_A, (u8)result);
+  TICK(cpu,  8);
+}
+
 // weird shit
 static inline void nop(registers_t *cpu) {
   TICK(cpu, 4);
@@ -528,6 +543,7 @@ static inline void cp_r(registers_t *cpu) {
   TICK(cpu, (reg == REG_HLm) ? 8 : 4);
 }
 
+
 // jumps
 static inline void jr_e(registers_t *cpu) {
   int8_t offset = (int8_t)fetch8(cpu);
@@ -580,6 +596,42 @@ static inline void jp_nz_a16(registers_t *cpu) {
   u16 next = read16(cpu, cpu->PC + 1);
   
   if (!cpu->F.Z) {
+    cpu->PC = next;
+    TICK(cpu, 16);
+  } else {
+    cpu->PC += 3; // skip
+    TICK(cpu, 12);
+  }
+}
+
+static inline void jp_nc_a16(registers_t *cpu) {
+  u16 next = read16(cpu, cpu->PC + 1);
+  
+  if (!cpu->F.C) {
+    cpu->PC = next;
+    TICK(cpu, 16);
+  } else {
+    cpu->PC += 3; // skip
+    TICK(cpu, 12);
+  }
+}
+
+static inline void jp_c_a16(registers_t *cpu) {
+  u16 next = read16(cpu, cpu->PC + 1);
+  
+  if (cpu->F.C) {
+    cpu->PC = next;
+    TICK(cpu, 16);
+  } else {
+    cpu->PC += 3; // skip
+    TICK(cpu, 12);
+  }
+}
+
+static inline void jp_z_a16(registers_t *cpu) {
+  u16 next = read16(cpu, cpu->PC + 1);
+  
+  if (cpu->F.Z) {
     cpu->PC = next;
     TICK(cpu, 16);
   } else {
@@ -664,8 +716,26 @@ static inline void ret_nz(registers_t *cpu) {
   }
 }
 
+static inline void ret_nc(registers_t *cpu) {
+  if (!cpu->F.C) {
+    cpu->PC = pop(cpu);
+    TICK(cpu, 20);
+  } else {
+    TICK(cpu, 8);
+  }
+}
+
 static inline void ret_z(registers_t *cpu) {
   if (cpu->F.Z) {
+    cpu->PC = pop(cpu);
+    TICK(cpu, 20);
+  } else {
+    TICK(cpu, 8);
+  }
+}
+
+static inline void ret_c(registers_t *cpu) {
+  if (cpu->F.C) {
     cpu->PC = pop(cpu);
     TICK(cpu, 20);
   } else {
@@ -714,17 +784,77 @@ static inline void call_nz(registers_t *cpu) {
  }
 }
 
+static inline void call_nc(registers_t *cpu) {
+ u16 next = read16(cpu, cpu->PC + 1);
+
+ if (!cpu->F.C) {
+   push(cpu, cpu->PC+3);
+   cpu->PC = next;
+   TICK(cpu, 24);
+ } else {
+   cpu->PC += 3;
+   TICK(cpu, 12);
+ }
+}
+
+static inline void call_c(registers_t *cpu) {
+ u16 next = read16(cpu, cpu->PC + 1);
+
+ if (cpu->F.C) {
+   push(cpu, cpu->PC+3);
+   cpu->PC = next;
+   TICK(cpu, 24);
+ } else {
+   cpu->PC += 3;
+   TICK(cpu, 12);
+ }
+}
+
+static inline void call_z(registers_t *cpu) {
+ u16 next = read16(cpu, cpu->PC + 1);
+
+ if (cpu->F.Z) {
+   push(cpu, cpu->PC+3);
+   cpu->PC = next;
+   TICK(cpu, 24);
+ } else {
+   cpu->PC += 3;
+   TICK(cpu, 12);
+ }
+}
+
+static inline void call_u16(registers_t *cpu) {
+   u16 next = read16(cpu, cpu->PC + 1);
+   push(cpu, cpu->PC+3);
+   cpu->PC = next;
+   TICK(cpu, 24);
+}
+
 static inline void add_a_imm(registers_t *cpu) {
   u8 imm = fetch8(cpu);
   u8 a = read_reg8(cpu, REG_A);
-  u8 result = a + imm;
+  u16 result = a + imm;
 
 
   SET_Z(cpu, result);
   SET_N(cpu, 0);
   SET_H(cpu, ((a & 0x0F) + (imm & 0x0F)) > 0x0F);
   SET_C(cpu, (result > 0xFF));
-  write_reg8(cpu, REG_A, result);
+  write_reg8(cpu, REG_A, (u8)result);
+  TICK(cpu, 8);
+}
+
+static inline void sub_a_imm(registers_t *cpu) {
+  u8 imm = fetch8(cpu);
+  u8 a = read_reg8(cpu, REG_A);
+  u16 result = a - imm;
+
+  SET_Z(cpu, (u8)result);                       
+  SET_N(cpu, 1);                                
+  SET_H(cpu, (a & 0x0F) < (imm & 0x0F));        
+  SET_C(cpu, a < imm); 
+
+  write_reg8(cpu, REG_A, (u8)result);
   TICK(cpu, 8);
 }
 
@@ -736,6 +866,21 @@ static inline void rst(registers_t *cpu) {
   push(cpu, cpu->PC + 1);
   cpu->PC = addr;
 
+  TICK(cpu, 16);
+}
+
+void prefix(registers_t *cpu) {
+  u8 opcode = fetch8(cpu);
+  if (!cb_ops[opcode]) {
+    printf("Non existent prefixed opcode\n");
+  } else {
+    cb_ops[opcode](cpu);
+  }
+}
+
+static inline void reti(registers_t *cpu) {
+  cpu->PC = pop(cpu);
+  cpu->IME = 1;
   TICK(cpu, 16);
 }
 
@@ -766,9 +911,14 @@ void (*opcodes[256])(registers_t *cpu) = {
   xor_r, xor_r, xor_r, xor_r, xor_r, xor_r, xor_r, xor_r, 
   or_r, or_r, or_r, or_r, or_r, or_r, or_r, or_r, 
   cp_r, cp_r, cp_r, cp_r, cp_r, cp_r, cp_r, cp_r, 
-  ret_nz, pop_rr, jp_nz_a16, jp_a16, call_nz, push_rr, rst, ret_z, 
-  ret,
-  
+
+  ret_nz, pop_rr, jp_nz_a16, jp_a16, call_nz, push_rr ,add_a_imm, rst, 
+  ret_z, ret, jp_z_a16, prefix, call_z, call_u16, adc_u8, rst, 
+  ret_nc, pop_rr, jp_nc_a16, NULL, call_nc, push_rr, sub_a_imm, rst,
+  ret_c, reti, jp_c_a16, NULL, call_c, NULL, 
+};
+
+void (*cb_ops[256])(registers_t *cpu) = {
 };
 
 void cpu_go(registers_t *cpu) {
