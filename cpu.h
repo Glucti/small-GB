@@ -31,6 +31,7 @@ typedef struct {
   unsigned long cycle;
   
   bool stopped;
+  bool halt;
   bool IME;
 
 } registers_t; 
