@@ -2,10 +2,44 @@
 #include <string.h>
 #include <stdlib.h>
 #include "cpu.h"
+#include "memory.h"
 #include "test.h"
 //#ifndef TESTING
 //#define TESTING
 //#endif
+
+#define TRACE_LEN 4096
+typedef struct {
+  u16 pc;
+  u8  op;
+  u8  a,b,c,d,e,h,l;
+  u16 sp, hl, de, bc;
+  u8  fz, fn, fh, fc;
+  unsigned long cyc;
+} Trace;
+
+static Trace tracebuf[TRACE_LEN];
+static size_t tracepos = 0;
+
+static inline void trace_log(registers_t *cpu, u8 op) {
+  Trace *t = &tracebuf[tracepos++ & (TRACE_LEN-1)];
+  t->pc = cpu->PC-1; t->op = op;
+  t->a = cpu->A; t->b = cpu->B; t->c = cpu->C;
+  t->d = cpu->D; t->e = cpu->E; t->h = cpu->H; t->l = cpu->L;
+  t->sp = cpu->SP; t->hl = cpu->HL; t->de = cpu->DE; t->bc = cpu->BC;
+  t->fz = cpu->F.Z; t->fn = cpu->F.N; t->fh = cpu->F.H; t->fc = cpu->F.C;
+  t->cyc = cpu->cycle;
+}
+
+static void trace_dump_last(size_t n) {
+  size_t start = (tracepos > n ? tracepos - n : 0);
+  for (size_t i = start; i < tracepos; ++i) {
+    Trace *t = &tracebuf[i & (TRACE_LEN-1)];
+    fprintf(stderr,
+      "PC=%04X OP=%02X A=%02X F=%d%d%d%d BC=%04X DE=%04X HL=%04X SP=%04X CYC=%lu\n",
+      t->pc, t->op, t->a, t->fz,t->fn,t->fh,t->fc, t->bc, t->de, t->hl, t->sp, t->cyc);
+  }
+}
 
 
 #define TICK(cpu, n)  ((cpu)->cycle += (n))
@@ -32,56 +66,30 @@
 #define REG_SP 3
 
 
+
 void (*cb_ops[256])(registers_t *cpu);
 
 // helpers
-//static inline u8 read8(registers_t *cpu, u16 addy) {
-//  return cpu->mem[addy];
-//}
-//static inline void write8(registers_t *cpu, u16 addy, u8 val) {
-//  cpu->mem[addy] = val;
-//}
-
-u8 read8(registers_t *cpu, u16 addr) {
-    if (addr < 0x8000) return cpu->mem[addr];
-    else if (addr >= 0xC000 && addr < 0xE000) return cpu->mem[addr];
-    else if (addr >= 0xE000 && addr < 0xFE00) return cpu->mem[addr - 0x2000];
-    else if (addr == 0xFF02) return cpu->mem[addr] | 0x80; // serial always ready
-    else if (addr >= 0xFF80 && addr <= 0xFFFE) return cpu->mem[addr];
-    return 0x00;
+static inline u8 read8(registers_t *cpu, u16 addy) {
+  return read_byte_bus(cpu->bus, addy);
 }
 
-void write8(registers_t *cpu, u16 addr, u8 val) {
-    if (addr < 0x8000) return; // ROM is read-only
-
-    else if (addr >= 0xC000 && addr < 0xE000) cpu->mem[addr] = val;
-    else if (addr >= 0xE000 && addr < 0xFE00) cpu->mem[addr - 0x2000] = val;
-    else if (addr == 0xFF01) cpu->mem[addr] = val; // serial data
-    else if (addr == 0xFF02) {
-        cpu->mem[addr] = val;
-        if (val == 0x81) { // "transfer start"
-            putchar(cpu->mem[0xFF01]);
-            fflush(stdout);
-            cpu->mem[0xFF02] = 0x01; // mark transfer complete
-        }
-    }
-    else if (addr >= 0xFF80 && addr <= 0xFFFE) cpu->mem[addr] = val;
+static inline void write8(registers_t *cpu, u16 addy, u8 val) {
+  return write_byte_bus(cpu->bus, addy, val);
 }
-
 
 static inline u16 read16(registers_t *cpu, u16 addy) {
-  u8 low = read8(cpu, addy);
-  u8 high = read8(cpu, addy + 1);
+  return bus_read16(cpu->bus, addy);
+}
 
-  return (high << 8) | low;
-}
 static inline void write16(registers_t *cpu, u16 addy, u16 val) {
-  write8(cpu, addy, val & 0xFF);
-  write8(cpu, addy + 1, val >> 8);
+  bus_write16(cpu->bus, addy, val);
 }
+
 u8 fetch8(registers_t *cpu) {
   return read8(cpu, cpu->PC++);
 }
+
 u16 fetch16(registers_t *cpu) {
   u16 val = read16(cpu, cpu->PC);
   cpu->PC += 2; 
@@ -236,7 +244,8 @@ static inline void dec_r(registers_t *cpu) {
 
   SET_Z(cpu, val); 
   SET_N(cpu, 1);
-  SET_H(cpu, ((old & 0x0F) - 1) > 0x0F);
+  //SET_H(cpu, ((old & 0x0F) - 1) > 0x0F);
+  SET_H(cpu, (old & 0x0F) == 0);
 
   write_reg8(cpu, reg, val);
 
@@ -346,9 +355,6 @@ static inline void ld_r_r(registers_t *cpu) {
   int x = (opcode >> 3) & 7;
   int y = opcode & 7;
 
-  printf("LD_r_r: opcode=%02X x=%d y=%d HL=%04X E=%02X mem[HL]=%02X\n",
-         opcode, x, y, cpu->HL, cpu->E, cpu->mem[cpu->HL]);
-  
   u8 src = read_reg8(cpu, y);
   write_reg8(cpu, x, src);
   TICK(cpu, (x == REG_HLm || y == REG_HLm) ? 8 : 4);
@@ -364,7 +370,7 @@ static inline void rlca(registers_t *cpu) {
   int reg = read_reg8(cpu, REG_A);
   u8 msb = (reg >> 7) & 1;
   reg = (reg << 1) | msb;
-  SET_Z(cpu, 1);
+  cpu->F.Z = 0;
   SET_N(cpu, 0);
   SET_H(cpu, 0);
   SET_C(cpu, msb);
@@ -378,7 +384,7 @@ static inline void rra(registers_t *cpu) {
   int old_c = cpu->F.C;
 
   reg = (old_c << 7) | (reg >> 1);
-  SET_Z(cpu, 1);
+  cpu->F.Z = 0;
   SET_N(cpu, 0);
   SET_H(cpu, 0);
   SET_C(cpu, lsb);
@@ -391,7 +397,7 @@ static inline void rla(registers_t *cpu) {
   u8 msb = (reg >> 7) & 1;
   int old_c = cpu->F.C;
   reg = (reg << 1) | old_c;
-  SET_Z(cpu, 1);
+  cpu->F.Z = 0;
   SET_N(cpu, 0);
   SET_H(cpu, 0);
   SET_C(cpu, msb);
@@ -403,7 +409,7 @@ static inline void rrca(registers_t *cpu) {
   int reg = read_reg8(cpu, REG_A);
   u8 lsb = reg & 1;
   reg = (reg >> 1) | (reg << 7);
-  SET_Z(cpu, 1);
+  cpu->F.Z = 0;
   SET_N(cpu, 0); 
   SET_H(cpu, 0);
   SET_C(cpu, lsb);
@@ -459,22 +465,39 @@ static inline void sub_r(registers_t *cpu) {
 }
 
 
-static inline void sbc_r(registers_t *cpu) { 
-  u8 opcode = read8(cpu, cpu->PC - 1); 
-  int reg = opcode & 7; 
-  u8 a = read_reg8(cpu, REG_A); 
-  u8 r = read_reg8(cpu, reg); 
-  u16 result = a - r - cpu->F.C; 
+//static inline void sbc_r(registers_t *cpu) { 
+//  u8 opcode = read8(cpu, cpu->PC - 1); 
+//  int reg = opcode & 7; 
+//  u8 a = read_reg8(cpu, REG_A); 
+//  u8 r = read_reg8(cpu, reg); 
+//  u16 result = a - r - cpu->F.C; 
+//
+//  SET_Z(cpu, (result & 0xFF)); 
+//  SET_N(cpu, 1); 
+//  //SET_H(cpu, ((a & 0x0F) < (r & 0x0F))); 
+//  //SET_C(cpu, (a < r)); 
+//  SET_H(cpu, ((a ^ r ^ result) & 0x10) != 0);
+//  SET_C(cpu, result > 0xFF); 
+//  write_reg8(cpu, REG_A, (u8)result); 
+//
+//  TICK(cpu, (reg == REG_HLm) ? 8 : 4); 
+//}
+static inline void sbc_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int idx = opcode & 7;           // which register
+  u8 b = read_reg8(cpu, idx);     // its value
+  u8 a = cpu->A, c = cpu->F.C;
+  u16 res = (u16)a - b - c;
 
-  SET_Z(cpu, (result & 0xFF)); 
-  SET_N(cpu, 1); 
-  SET_H(cpu, ((a & 0x0F) < (r & 0x0F))); 
-  SET_C(cpu, (a < r)); 
+  SET_Z(cpu, (u8)res);
+  SET_N(cpu, 1);
+  SET_H(cpu, ((a ^ b ^ res) & 0x10) != 0);
+  SET_C(cpu, res > 0xFF);
 
-  write_reg8(cpu, REG_A, (u8)result); 
-
-  TICK(cpu, (reg == REG_HLm) ? 8 : 4); 
+  cpu->A = (u8)res;
+  TICK(cpu, (idx == REG_HLm) ? 8 : 4);
 }
+
 
 static inline void sbc_a_u8(registers_t *cpu) { 
   u8 imm = fetch8(cpu);
@@ -498,7 +521,7 @@ static inline void adc_r(registers_t *cpu) {
   u8 r = read_reg8(cpu, reg);
   u16 result = a + r + cpu->F.C;
 
-  SET_Z(cpu, (result & 0xFF));
+  SET_Z(cpu, (u8)result);
   SET_N(cpu, 0);
   SET_H(cpu, ((a & 0x0F) + (r & 0x0F) + cpu->F.C) > 0x0F);
   SET_C(cpu, (result > 0xFF));
@@ -540,26 +563,50 @@ static inline void cpl(registers_t *cpu) {
   TICK(cpu, 4);
 }
 
-static inline void daa(registers_t *cpu) { 
-  uint8_t offset = 0;
-  uint8_t a = (uint8_t)read_reg8(cpu, REG_A);
-  bool carry = false;
+//static inline void daa(registers_t *cpu) { 
+//  uint8_t offset = 0;
+//  uint8_t a = (uint8_t)read_reg8(cpu, REG_A);
+//  bool carry = false;
+//
+//  if (!cpu->F.N) {
+//    if (cpu->F.H || (a & 0x0F) > 0x09)  offset |= 0x06;
+//    if (cpu->F.C || (a & 0xFF) > 0x99) { offset |= 0x60; carry=true; }
+//    a += offset;
+//  } else {
+//    if (cpu->F.H) offset |= 0x06;
+//    if (cpu->F.C) offset |= 0x60;
+//    a -= offset;
+//  }
+//
+//  write_reg8(cpu, REG_A, (u8)a);
+//  SET_Z(cpu, a);
+//  SET_H(cpu, 0);
+//  SET_C(cpu, (carry == 1 ? 1 : 0));
+//
+//  TICK(cpu, 4);
+//}
 
-  if (!cpu->F.N) {
-    if (cpu->F.H || (a & 0x0F) > 9)  offset |= 0x06;
-    if (cpu->F.C || (a & 0xFF) > 99) { offset |= 0x60; carry=true; }
-    a += offset;
-  } else {
-    if (cpu->F.H) offset |= 0x06;
-    if (cpu->F.C) offset |= 0x60;
-    a -= offset;
+static inline void daa(registers_t *cpu) {
+  uint8_t a = cpu->A;
+  uint8_t corr = 0;
+  uint8_t newC = cpu->F.C;  // preserve by default
+
+  if (!cpu->F.N) { // after ADD/ADC
+    if (cpu->F.H || (a & 0x0F) > 0x09) corr |= 0x06;
+    if (cpu->F.C || a > 0x99) { corr |= 0x60; newC = 1; }
+    a += corr;
+  } else {         // after SUB/SBC
+    if (cpu->F.H) corr |= 0x06;
+    if (cpu->F.C) corr |= 0x60;
+    a -= corr;
+    // newC stays whatever it was
   }
 
-  write_reg8(cpu, REG_A, (u8)a);
+  cpu->A = a;
   SET_Z(cpu, a);
+  SET_N(cpu, cpu->F.N);    // unchanged
   SET_H(cpu, 0);
-  SET_C(cpu, (carry == 1 ? 1 : 0));
-
+  SET_C(cpu, newC);
   TICK(cpu, 4);
 }
 
@@ -582,7 +629,6 @@ static inline void cp_r(registers_t *cpu) {
   SET_Z(cpu, (result & 0xFF));
   SET_H(cpu, (a & 0x0F) < (r & 0x0F));
   SET_C(cpu, (a < r));
-  write_reg8(cpu, REG_A, result);
   TICK(cpu, (reg == REG_HLm) ? 8 : 4);
 }
 
@@ -636,55 +682,55 @@ static inline void jr_c(registers_t *cpu) {
 }
 
 static inline void jp_nz_a16(registers_t *cpu) {
-  u16 next = read16(cpu, cpu->PC + 1);
+  u16 next = fetch16(cpu);
   
   if (!cpu->F.Z) {
     cpu->PC = next;
     TICK(cpu, 16);
   } else {
-    cpu->PC += 3; // skip
+    //cpu->PC += 3; // skip
     TICK(cpu, 12);
   }
 }
 
 static inline void jp_nc_a16(registers_t *cpu) {
-  u16 next = read16(cpu, cpu->PC + 1);
+  u16 next = fetch16(cpu);
   
   if (!cpu->F.C) {
     cpu->PC = next;
     TICK(cpu, 16);
   } else {
-    cpu->PC += 3; // skip
+    //cpu->PC += 3; // skip
     TICK(cpu, 12);
   }
 }
 
 static inline void jp_c_a16(registers_t *cpu) {
-  u16 next = read16(cpu, cpu->PC + 1);
+  u16 next = fetch16(cpu);
   
   if (cpu->F.C) {
     cpu->PC = next;
     TICK(cpu, 16);
   } else {
-    cpu->PC += 3; // skip
+    //cpu->PC += 3; // skip
     TICK(cpu, 12);
   }
 }
 
 static inline void jp_z_a16(registers_t *cpu) {
-  u16 next = read16(cpu, cpu->PC + 1);
+  u16 next = fetch16(cpu);
   
   if (cpu->F.Z) {
     cpu->PC = next;
     TICK(cpu, 16);
   } else {
-    cpu->PC += 3; // skip
+    //cpu->PC += 3; // skip
     TICK(cpu, 12);
   }
 }
 
 static inline void jp_a16(registers_t *cpu) {
-  u16 next = read16(cpu, cpu->PC + 1);
+  u16 next = fetch16(cpu);
   cpu->PC = next;
   TICK(cpu, 16);
 }
@@ -693,6 +739,7 @@ static inline void ccf(registers_t *cpu) {
   SET_C(cpu, !cpu->F.C);
   SET_N(cpu, 0);
   SET_H(cpu, 0);
+  TICK(cpu, 4);
 }
 
 //bit ops
@@ -815,60 +862,56 @@ static inline void push_rr(registers_t *cpu) {
 }
 
 static inline void call_nz(registers_t *cpu) {
- u16 next = read16(cpu, cpu->PC + 1);
+ u16 next = fetch16(cpu);
 
  if (!cpu->F.Z) {
-   push(cpu, cpu->PC+3);
+   push(cpu, cpu->PC);
    cpu->PC = next;
    TICK(cpu, 24);
  } else {
-   cpu->PC += 3;
    TICK(cpu, 12);
  }
 }
 
 static inline void call_nc(registers_t *cpu) {
- u16 next = read16(cpu, cpu->PC + 1);
+ u16 next = fetch16(cpu);
 
  if (!cpu->F.C) {
-   push(cpu, cpu->PC+3);
+   push(cpu, cpu->PC);
    cpu->PC = next;
    TICK(cpu, 24);
  } else {
-   cpu->PC += 3;
    TICK(cpu, 12);
  }
 }
 
 static inline void call_c(registers_t *cpu) {
- u16 next = read16(cpu, cpu->PC + 1);
+ u16 next = fetch16(cpu);
 
  if (cpu->F.C) {
-   push(cpu, cpu->PC+3);
+   push(cpu, cpu->PC);
    cpu->PC = next;
    TICK(cpu, 24);
  } else {
-   cpu->PC += 3;
    TICK(cpu, 12);
  }
 }
 
 static inline void call_z(registers_t *cpu) {
- u16 next = read16(cpu, cpu->PC + 1);
+ u16 next = fetch16(cpu);
 
  if (cpu->F.Z) {
-   push(cpu, cpu->PC+3);
+   push(cpu, cpu->PC);
    cpu->PC = next;
    TICK(cpu, 24);
  } else {
-   cpu->PC += 3;
    TICK(cpu, 12);
  }
 }
 
 static inline void call_u16(registers_t *cpu) {
-   u16 next = read16(cpu, cpu->PC + 1);
-   push(cpu, cpu->PC+3);
+   u16 next = fetch16(cpu);
+   push(cpu, cpu->PC);
    cpu->PC = next;
    TICK(cpu, 24);
 }
@@ -879,7 +922,7 @@ static inline void add_a_imm(registers_t *cpu) {
   u16 result = a + imm;
 
 
-  SET_Z(cpu, result);
+  SET_Z(cpu, (u8)result);
   SET_N(cpu, 0);
   SET_H(cpu, ((a & 0x0F) + (imm & 0x0F)) > 0x0F);
   SET_C(cpu, (result > 0xFF));
@@ -906,7 +949,7 @@ static inline void rst(registers_t *cpu) {
   u8 n = (opcode >> 3) & 7;
 
   u16 addr = n << 3;
-  push(cpu, cpu->PC + 1);
+  push(cpu, cpu->PC);
   cpu->PC = addr;
 
   TICK(cpu, 16);
@@ -944,6 +987,7 @@ static inline void and_a_imm(registers_t *cpu) {
   u8 imm = fetch8(cpu);
   u8 a = read_reg8(cpu, REG_A);
   u8 result = a & imm;
+  write_reg8(cpu, REG_A, result);
 
   SET_Z(cpu, result);
   SET_N(cpu, 0);
@@ -958,10 +1002,14 @@ static inline void add_sp_n8(registers_t *cpu) {
     u16 sp = cpu->SP;
     u16 result = sp + imm;
 
-    SET_Z(cpu, 0);
-    SET_N(cpu, 0);
-    SET_H(cpu, ((sp ^ imm ^ result) & 0x10) != 0);
-    SET_C(cpu, ((sp ^ imm ^ result) & 0x100) != 0);
+    cpu->F.Z = 0;
+    cpu->F.N = 0;
+
+    u8 lo = (u8)(sp & 0xFF);
+    u8 n = (u8)imm;
+
+    SET_H(cpu, ((lo & 0x0F) + (n & 0x0F)) > 0x0F);
+    SET_C(cpu, (lo + n) > 0xFF);
 
     cpu->SP = result;
     TICK(cpu, 16);
@@ -988,7 +1036,7 @@ static inline void xor_a_u8(registers_t *cpu) {
   SET_Z(cpu, result);
   SET_N(cpu, 0);
   SET_H(cpu, 0);
-  SET_Z(cpu, 0);
+  SET_C(cpu, 0);
 
   TICK(cpu, 8);
 }
@@ -1035,7 +1083,7 @@ static inline void or_a_u8(registers_t *cpu) {
   SET_Z(cpu, result);
   SET_N(cpu, 0);
   SET_H(cpu, 0);
-  SET_Z(cpu, 0);
+  SET_C(cpu, 0);
 
   TICK(cpu, 8);
 }
@@ -1059,10 +1107,13 @@ static inline void ld_hl_sp_e8(registers_t *cpu) {
   u16 sp = cpu->SP;
   u16 result = sp + offset;
 
-  SET_Z(cpu, 0);
-  SET_N(cpu, 0);
-  SET_H(cpu, ((sp & 0x0F) + (offset & 0x0F)) > 0x0F);
-  SET_C(cpu, ((sp & 0xFF) + (offset & 0xFF)) > 0xFF);
+  cpu->F.Z = 0;
+  cpu->F.N = 0;
+
+  u8 lo = (u8)(sp & 0xFF);
+  u8 n = (u8)offset;
+  SET_H(cpu, ((lo & 0x0F) + (n & 0x0F)) > 0x0F);
+  SET_C(cpu, (lo + n) > 0xFF);
 
   cpu->HL = result;
   TICK(cpu, 12);
@@ -1244,7 +1295,7 @@ static inline void bit_n_r(registers_t *cpu) {
   int reg = opcode & 7;
 
   u8 val = read_reg8(cpu, reg);
-  bool zero = !(val & (1 << bit));
+  bool zero = (val & (1 << bit));
 
   SET_Z(cpu, zero);
   SET_N(cpu, 0);
@@ -1285,7 +1336,7 @@ void (*opcodes[256])(registers_t *cpu) = {
   stop, ld_rr_immediate, ld_de_a, inc_rr, inc_r, dec_r, ld_r_immediate, rla,
   jr_e, add_hl_rr, ld_a_de, dec_rr, inc_r, dec_r, ld_r_immediate, rra, 
   jr_nz, ld_rr_immediate, ld_hlp_a, inc_rr, inc_r, dec_r, ld_r_immediate, daa,
-  jr_z, ld_rr_immediate, ld_a_hlp, dec_rr, inc_r, dec_r, ld_r_immediate, cpl,
+  jr_z, add_hl_rr, ld_a_hlp, dec_rr, inc_r, dec_r, ld_r_immediate, cpl,
   jr_nc, ld_rr_immediate, ld_hlm_a, inc_rr, inc_r, dec_r, ld_r_immediate, scf,
   jr_c, add_hl_rr, ld_a_hlm, dec_rr, inc_r, dec_r, ld_r_immediate, ccf,
   ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, ld_r_r, 
@@ -1353,30 +1404,26 @@ void (*cb_ops[256])(registers_t *cpu) = {
   set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r,     
 };
 
-//void cpu_go(registers_t *cpu) {
-//    u8 opcode = fetch8(cpu);
-//
-//    if (opcodes[opcode]) {
-//        opcodes[opcode](cpu);
-//    } else {
-//        printf("Unimplemented opcode: 0x%02X\n", opcode);
-//    }
-//}
-
 
 void debug_state(registers_t *cpu, u8 opcode) {
-    printf("PC=%04X OP=%02X A=%02X F=%d%d%d%d BC=%04X DE=%04X HL=%04X SP=%04X CYC=%lu\n",
+    fprintf(stderr, "PC=%04X OP=%02X A=%02X F=%d%d%d%d BC=%04X DE=%04X HL=%04X SP=%04X CYC=%lu\n",
         cpu->PC-1, opcode,
         cpu->A,
         cpu->F.Z, cpu->F.N, cpu->F.H, cpu->F.C,
         cpu->BC, cpu->DE, cpu->HL, cpu->SP, cpu->cycle);
+    fflush(stderr);
 }
 
 void cpu_go(registers_t *cpu) {
     u8 opcode = fetch8(cpu);
-    debug_state(cpu, opcode);
+    trace_log(cpu, opcode);
+    //debug_state(cpu, opcode);
     if (opcodes[opcode]) opcodes[opcode](cpu);
-    else printf("Unimplemented opcode: 0x%02X\n", opcode);
+    else {
+      fprintf(stderr, "Unimplemented opcode: 0x%02X\n", opcode);
+      trace_dump_last(182);
+      exit(1);
+    } 
 }
 
 
@@ -1385,40 +1432,86 @@ void RESET_CPU(registers_t *cpu) {
     cpu->SP = 0xFFFE;
     cpu->PC = 0x0100;
 }
+
 void load_rom(registers_t *cpu, const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) { perror("ROM open failed"); exit(1); }
+  if (bus_load_rom(cpu->bus, path) != 0) {
+    fprintf(stderr, "ROM has failed to load: %s\n", path);
+    exit(1);
+  }
+  printf("Loaded ROM %s\n", path);
+}
 
-    size_t bytes = fread(cpu->mem, 1, 0x8000, f);
-    fclose(f);
+static inline int service_interrupt(registers_t *cpu) {
+  u8 req = cpu->bus->IF & cpu->bus->IE;
+  if (!cpu->IME || !req) return 0;
 
-    printf("Loaded %zu bytes from %s\n", bytes, path);
+  cpu->halt = false;
+  cpu->IME = 0;
+
+  int which = -1;
+  if (req & 0x01) which = 0;
+  else if (req & 0x02) which = 1;
+  else if (req & 0x04) which = 2;
+  else if (req & 0x08) which = 3;
+  else if (req & 0x10) which = 4;
+
+  if (which >= 0) {
+    cpu->bus->IF &= ~(1 << which);
+
+    push(cpu, cpu->PC);
+    cpu->PC = (u16)(0x40 + (which * 8));
+    TICK(cpu, 20);
+    return 1;
+  }
+  return 0;
+}
+
+static inline void halt_wake(registers_t *cpu) {
+  if (!cpu->halt) return;
+  if (cpu->bus->IF & cpu->bus->IE) {
+    cpu->halt = false;
+  }
 }
 
 
-
-int main(void) {
+int main(int argc, char *argv[]) {
 #ifdef TESTING
     run_tests();
 #endif
 
-    registers_t cpu = {0};
-    RESET_CPU(&cpu);
-    load_rom(&cpu, "cpu_instrs.gb");
-    for (int i = 0x100; i < 0x110; i++)
-    printf("%02X ", cpu.mem[i]);
-puts("");
-
-    printf("ROM first bytes: %02X %02X %02X %02X %02X\n",
-       cpu.mem[0x0000], cpu.mem[0x0100], cpu.mem[0x0101], cpu.mem[0x0102], cpu.mem[0x0150]);
-
-    printf("Starting PC=%04X (byte there=%02X)\n", cpu.PC, cpu.mem[cpu.PC]);
-    for (int i = 0; i < 1000; i++) {
-        cpu_go(&cpu);
-	printf("Executed opcode %02X at PC=%04X\n", cpu.mem[cpu.PC - 1], cpu.PC - 1);
+    if (argc < 2) {
+      fprintf(stderr, "LOL\n");
+      return 1;
     }
 
-    printf("CPU stopped after %lu cycles\n", cpu.cycle);
-    return 0;
+    Bus_t *bus = (Bus_t*)malloc(sizeof(Bus_t));
+
+    if (!bus) {
+      perror("malloc fail");
+      return 1;
+    }
+
+    init_bus(bus);
+    if (bus_load_rom(bus, argv[1]) != 0) return 1;
+
+    registers_t cpu; 
+    RESET_CPU(&cpu);
+    cpu.bus = bus;
+    unsigned long long max_cycles = 500000000000ULL;
+    for (;;) {
+      if (cpu.cycle > max_cycles) {
+	//fprintf(stderr, "Cycle cap hit. Dumping trace:\n");
+	//trace_dump_last(256);
+	exit(1);
+      }
+      halt_wake(&cpu);
+      if (service_interrupt(&cpu)) continue;
+      if (cpu.halt) continue;
+      cpu_go(&cpu);
+  }
 }
+
+
+
+
 

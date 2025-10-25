@@ -1,5 +1,6 @@
 emulator
 tests
+gb-test-roms
 
 *.o
 *.out

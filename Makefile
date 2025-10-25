@@ -4,7 +4,7 @@ CFLAGS   := -Wall -Wextra -std=c99 -O2
 TARGET   := emulator
 TESTBIN  := tests
 
-SRC      := cpu.c
+SRC      := cpu.c memory.c
 TESTSRC  := $(SRC) cpu_tests.c
 
 # ===== DEFAULT BUILD =====
