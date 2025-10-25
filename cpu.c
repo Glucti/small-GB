@@ -1,9 +1,11 @@
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 #include "cpu.h"
 #include "test.h"
-#ifndef TESTING
-#define TESTING
-#endif
+//#ifndef TESTING
+//#define TESTING
+//#endif
 
 
 #define TICK(cpu, n)  ((cpu)->cycle += (n))
@@ -33,12 +35,40 @@
 void (*cb_ops[256])(registers_t *cpu);
 
 // helpers
-static inline u8 read8(registers_t *cpu, u16 addy) {
-  return cpu->mem[addy];
+//static inline u8 read8(registers_t *cpu, u16 addy) {
+//  return cpu->mem[addy];
+//}
+//static inline void write8(registers_t *cpu, u16 addy, u8 val) {
+//  cpu->mem[addy] = val;
+//}
+
+u8 read8(registers_t *cpu, u16 addr) {
+    if (addr < 0x8000) return cpu->mem[addr];
+    else if (addr >= 0xC000 && addr < 0xE000) return cpu->mem[addr];
+    else if (addr >= 0xE000 && addr < 0xFE00) return cpu->mem[addr - 0x2000];
+    else if (addr == 0xFF02) return cpu->mem[addr] | 0x80; // serial always ready
+    else if (addr >= 0xFF80 && addr <= 0xFFFE) return cpu->mem[addr];
+    return 0x00;
 }
-static inline void write8(registers_t *cpu, u16 addy, u8 val) {
-  cpu->mem[addy] = val;
+
+void write8(registers_t *cpu, u16 addr, u8 val) {
+    if (addr < 0x8000) return; // ROM is read-only
+
+    else if (addr >= 0xC000 && addr < 0xE000) cpu->mem[addr] = val;
+    else if (addr >= 0xE000 && addr < 0xFE00) cpu->mem[addr - 0x2000] = val;
+    else if (addr == 0xFF01) cpu->mem[addr] = val; // serial data
+    else if (addr == 0xFF02) {
+        cpu->mem[addr] = val;
+        if (val == 0x81) { // "transfer start"
+            putchar(cpu->mem[0xFF01]);
+            fflush(stdout);
+            cpu->mem[0xFF02] = 0x01; // mark transfer complete
+        }
+    }
+    else if (addr >= 0xFF80 && addr <= 0xFFFE) cpu->mem[addr] = val;
 }
+
+
 static inline u16 read16(registers_t *cpu, u16 addy) {
   u8 low = read8(cpu, addy);
   u8 high = read8(cpu, addy + 1);
@@ -1068,6 +1098,187 @@ static inline void cp_a_u8(registers_t *cpu) {
   TICK(cpu, 8);
 }
 
+
+// $CB PREFIX 
+static inline void rlc_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = opcode & 7;
+
+  u8 val = read_reg8(cpu, reg);
+  u8 carry = (val >> 7) & 1;
+  val = (val << 1) | carry;
+
+  SET_Z(cpu, val);
+  SET_N(cpu, 0);
+  SET_H(cpu, 0);
+  SET_C(cpu, carry);
+
+  write_reg8(cpu, reg, val);
+  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
+}
+
+static inline void rrc_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = opcode & 7;
+
+  u8 val = read_reg8(cpu, reg);
+  u8 carry = val & 1;
+  val = (val >> 1) | (carry << 7);
+
+  SET_Z(cpu, val);
+  SET_N(cpu, 0);
+  SET_H(cpu, 0);
+  SET_C(cpu, carry);
+
+  write_reg8(cpu, reg, val);
+  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
+}
+
+static inline void rl_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = opcode & 7;
+
+  u8 val = read_reg8(cpu, reg);
+  u8 old_c = cpu->F.C;
+  u8 new_c = (val >> 7) & 1;
+  val = (val << 1) | old_c;
+
+  SET_Z(cpu, val);
+  SET_N(cpu, 0);
+  SET_H(cpu, 0);
+  SET_C(cpu, new_c);
+
+  write_reg8(cpu, reg, val);
+  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
+}
+
+static inline void rr_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = opcode & 7;
+
+  u8 val = read_reg8(cpu, reg);
+  u8 old_c = cpu->F.C;
+  u8 new_c = val & 1;
+  val = (val >> 1) | (old_c << 7);
+
+  SET_Z(cpu, val);
+  SET_N(cpu, 0);
+  SET_H(cpu, 0);
+  SET_C(cpu, new_c);
+
+  write_reg8(cpu, reg, val);
+  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
+}
+
+static inline void sla_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = opcode & 7;
+
+  u8 val = read_reg8(cpu, reg);
+  u8 new_c = (val >> 7) & 1;
+  val <<= 1;
+
+  SET_Z(cpu, val);
+  SET_N(cpu, 0);
+  SET_H(cpu, 0);
+  SET_C(cpu, new_c);
+
+  write_reg8(cpu, reg, val);
+  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
+}
+
+static inline void sra_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = opcode & 7;
+
+  u8 val = read_reg8(cpu, reg);
+  u8 carry = val & 1;
+  u8 msb = val & 0x80;
+  val = (val >> 1) | msb;
+
+  SET_Z(cpu, val);
+  SET_N(cpu, 0);
+  SET_H(cpu, 0);
+  SET_C(cpu, carry);
+
+  write_reg8(cpu, reg, val);
+  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
+}
+
+static inline void swap_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = opcode & 7;
+
+  u8 val = read_reg8(cpu, reg);
+  val = (val << 4) | (val >> 4);
+
+  SET_Z(cpu, val);
+  SET_N(cpu, 0);
+  SET_H(cpu, 0);
+  SET_C(cpu, 0);
+
+  write_reg8(cpu, reg, val);
+  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
+}
+
+static inline void srl_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int reg = opcode & 7;
+
+  u8 val = read_reg8(cpu, reg);
+  u8 carry = val & 1;
+  val >>= 1;
+
+  SET_Z(cpu, val);
+  SET_N(cpu, 0);
+  SET_H(cpu, 0);
+  SET_C(cpu, carry);
+
+  write_reg8(cpu, reg, val);
+  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
+}
+
+static inline void bit_n_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int bit = (opcode >> 3) & 7;
+  int reg = opcode & 7;
+
+  u8 val = read_reg8(cpu, reg);
+  bool zero = !(val & (1 << bit));
+
+  SET_Z(cpu, zero);
+  SET_N(cpu, 0);
+  SET_H(cpu, 1);
+
+  TICK(cpu, (reg == REG_HLm) ? 12 : 8);
+}
+
+static inline void res_n_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int bit = (opcode >> 3) & 7;
+  int reg = opcode & 7;
+
+  u8 val = read_reg8(cpu, reg);
+  val &= ~(1 << bit);
+  write_reg8(cpu, reg, val);
+
+  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
+}
+
+static inline void set_n_r(registers_t *cpu) {
+  u8 opcode = read8(cpu, cpu->PC - 1);
+  int bit = (opcode >> 3) & 7;
+  int reg = opcode & 7;
+
+  u8 val = read_reg8(cpu, reg);
+  val |= (1 << bit);
+  write_reg8(cpu, reg, val);
+
+  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
+}
+
+
+
 void (*opcodes[256])(registers_t *cpu) = {
   nop, ld_rr_immediate, ld_bc_a, inc_rr, inc_r, dec_r, ld_r_immediate, rlca,
   ld_a16_sp, add_hl_rr, ld_a_bc, dec_rr, inc_r, dec_r, ld_r_immediate, rrca,
@@ -1106,27 +1317,108 @@ void (*opcodes[256])(registers_t *cpu) = {
 };
 
 void (*cb_ops[256])(registers_t *cpu) = {
+  rlc_r, rlc_r, rlc_r, rlc_r, rlc_r, rlc_r, rlc_r, rlc_r, 
+  rrc_r, rrc_r, rrc_r, rrc_r, rrc_r, rrc_r, rrc_r, rrc_r, 
+  rl_r, rl_r, rl_r, rl_r, rl_r, rl_r, rl_r, rl_r, 
+  rr_r, rr_r, rr_r, rr_r, rr_r, rr_r, rr_r, rr_r, 
+  sla_r, sla_r, sla_r, sla_r, sla_r, sla_r, sla_r, sla_r, 
+  sra_r, sra_r, sra_r, sra_r, sra_r, sra_r, sra_r, sra_r, 
+  swap_r, swap_r, swap_r, swap_r, swap_r, swap_r, swap_r, swap_r, 
+  srl_r, srl_r, srl_r, srl_r, srl_r, srl_r, srl_r, srl_r, 
+  bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r,     
+  bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r,     
+  bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r,     
+  bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r,     
+  bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r,     
+  bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r,     
+  bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r,     
+  bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r, bit_n_r,     
+
+  res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r,     
+  res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r,     
+  res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r,     
+  res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r,     
+  res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r,     
+  res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r,     
+  res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r,     
+  res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r, res_n_r,     
+
+  set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r,     
+  set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r,     
+  set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r,     
+  set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r,     
+  set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r,     
+  set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r,     
+  set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r,     
+  set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r, set_n_r,     
 };
+
+//void cpu_go(registers_t *cpu) {
+//    u8 opcode = fetch8(cpu);
+//
+//    if (opcodes[opcode]) {
+//        opcodes[opcode](cpu);
+//    } else {
+//        printf("Unimplemented opcode: 0x%02X\n", opcode);
+//    }
+//}
+
+
+void debug_state(registers_t *cpu, u8 opcode) {
+    printf("PC=%04X OP=%02X A=%02X F=%d%d%d%d BC=%04X DE=%04X HL=%04X SP=%04X CYC=%lu\n",
+        cpu->PC-1, opcode,
+        cpu->A,
+        cpu->F.Z, cpu->F.N, cpu->F.H, cpu->F.C,
+        cpu->BC, cpu->DE, cpu->HL, cpu->SP, cpu->cycle);
+}
 
 void cpu_go(registers_t *cpu) {
     u8 opcode = fetch8(cpu);
-
-    if (opcodes[opcode]) {
-        opcodes[opcode](cpu);
-    } else {
-        printf("Unimplemented opcode: 0x%02X\n", opcode);
-    }
+    debug_state(cpu, opcode);
+    if (opcodes[opcode]) opcodes[opcode](cpu);
+    else printf("Unimplemented opcode: 0x%02X\n", opcode);
 }
 
 
-int main(void) {
+void RESET_CPU(registers_t *cpu) {
+    memset(cpu, 0, sizeof(registers_t));
+    cpu->SP = 0xFFFE;
+    cpu->PC = 0x0100;
+}
+void load_rom(registers_t *cpu, const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { perror("ROM open failed"); exit(1); }
 
+    size_t bytes = fread(cpu->mem, 1, 0x8000, f);
+    fclose(f);
+
+    printf("Loaded %zu bytes from %s\n", bytes, path);
+}
+
+
+
+int main(void) {
 #ifdef TESTING
-  run_tests();
+    run_tests();
 #endif
 
-  printf("working");
+    registers_t cpu = {0};
+    RESET_CPU(&cpu);
+    load_rom(&cpu, "cpu_instrs.gb");
+    for (int i = 0x100; i < 0x110; i++)
+    printf("%02X ", cpu.mem[i]);
+puts("");
 
+    printf("ROM first bytes: %02X %02X %02X %02X %02X\n",
+       cpu.mem[0x0000], cpu.mem[0x0100], cpu.mem[0x0101], cpu.mem[0x0102], cpu.mem[0x0150]);
+
+    printf("Starting PC=%04X (byte there=%02X)\n", cpu.PC, cpu.mem[cpu.PC]);
+    for (int i = 0; i < 1000; i++) {
+        cpu_go(&cpu);
+	printf("Executed opcode %02X at PC=%04X\n", cpu.mem[cpu.PC - 1], cpu.PC - 1);
+    }
+
+    printf("CPU stopped after %lu cycles\n", cpu.cycle);
     return 0;
 }
 

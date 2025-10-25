@@ -900,6 +900,45 @@ void pop_bc(void) {
   PRINT_CPU(cpu);
 }
 
+void test_rlc_b(void) {
+    SET_CPU();
+    cpu.PC = 0x0000;
+    cpu.B = 0x85;          
+
+    cpu.mem[0x0000] = 0xCB;
+    cpu.mem[0x0001] = 0x00; 
+
+    cpu_go(&cpu);
+
+    assert(cpu.B == 0x0B);
+    assert(cpu.F.C == 1);
+    assert(cpu.F.Z == 0);
+    assert(cpu.F.N == 0);
+    assert(cpu.F.H == 0);
+    assert(cpu.cycle == 8);
+}
+
+void test_rlc_hlm(void) {
+    SET_CPU();
+    cpu.PC = 0x0000;
+    cpu.HL = 0x1234;
+    cpu.mem[0x1234] = 0x80; 
+
+    cpu.mem[0x0000] = 0xCB;
+    cpu.mem[0x0001] = 0x06; 
+
+    cpu_go(&cpu);
+
+    assert(cpu.mem[0x1234] == 0x01);
+    assert(cpu.F.C == 1);
+    assert(cpu.F.Z == 0);
+    assert(cpu.F.N == 0);
+    assert(cpu.F.H == 0);
+    assert(cpu.cycle == 16);
+}
+
+
+
 void run_tests() {
   RUN_TEST("LD A (BC)", ld_a_bc);
   RUN_TEST("LD (BC) A", ld_bc_a);
@@ -928,5 +967,7 @@ void run_tests() {
   RUN_TEST("XOR A (HL)", xor_a_hlm);
   RUN_TEST("CP A B", cp_b);
   RUN_TEST("POP BC", pop_bc);
+  RUN_TEST("RLC B", test_rlc_b);
+  RUN_TEST("RLC (HL)", test_rlc_hlm);
   printf("\nAll tests passed\n");
 }
