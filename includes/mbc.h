@@ -29,4 +29,6 @@ typedef struct Cartridge {
 
 Cartridge_t *load_cart(const char *path);
 void free_cart(Cartridge_t *cart);
+void cart_write(Cartridge_t *cart, uint16_t addy, uint8_t val); 
+uint8_t cart_read(Cartridge_t *cart, uint16_t addy);
 

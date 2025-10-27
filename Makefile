@@ -1,29 +1,31 @@
-# ===== BASIC CONFIG =====
-CC       := gcc
-CFLAGS   := -Wall -Wextra -std=c99 -O2
-TARGET   := emulator
-TESTBIN  := tests
+# ===== CONFIG =====
+CC      := gcc
+CFLAGS  := -std=c99 -O2 -Wall -Wextra -Iincludes
+LDFLAGS :=
+TARGET  := emulator
 
-SRC      := cpu.c memory.c
-TESTSRC  := $(SRC) cpu_tests.c
+SRCS    := main.c $(wildcard core/*.c)
+OBJDIR  := build
+OBJS    := $(patsubst %.c,$(OBJDIR)/%.o,$(SRCS))
+DEPS    := $(OBJS:.o=.d)
 
-# ===== DEFAULT BUILD =====
+# ===== DEFAULT =====
 all: $(TARGET)
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) $^ -o $@
+$(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
-# ===== RUN TESTS =====
-test: $(TESTBIN)
-	./$(TESTBIN)
+# compile .c -> build/.o and generate dep files alongside
+$(OBJDIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
-$(TESTBIN): $(TESTSRC)
-	$(CC) $(CFLAGS) -DTESTING $^ -o $@
+# include auto-generated dependencies
+-include $(DEPS)
 
 # ===== CLEAN =====
 clean:
-	rm -f $(TARGET) $(TESTBIN)
+	rm -rf $(OBJDIR) $(TARGET)
 
-# ===== PHONY TARGETS =====
-.PHONY: all test clean
+.PHONY: all clean
 

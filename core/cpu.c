@@ -3,10 +3,7 @@
 #include <stdlib.h>
 #include "cpu.h"
 #include "memory.h"
-#include "test.h"
-//#ifndef TESTING
-//#define TESTING
-//#endif
+#include "timers.h"
 
 #define TRACE_LEN 4096
 typedef struct {
@@ -42,7 +39,13 @@ static void trace_dump_last(size_t n) {
 }
 
 
-#define TICK(cpu, n)  ((cpu)->cycle += (n))
+#define TICK(cpu, n) do {  \
+  (cpu)->cycle += (n);    \
+  if (!(cpu)->stopped)    \
+    tick_timers(&(cpu)->bus->timers, (n), &(cpu)->bus->IF); \
+} while(0)
+
+
 #define SET_Z(cpu, n) ((cpu)->F.Z = ((n) == 0))
 #define SET_N(cpu, n) ((cpu)->F.N = (n))
 #define SET_H(cpu, n) ((cpu)->F.H = (n))
@@ -65,6 +68,7 @@ static void trace_dump_last(size_t n) {
 #define REG_HL 2
 #define REG_SP 3
 
+#define JOYP_IF 0x10
 
 
 void (*cb_ops[256])(registers_t *cpu);
@@ -550,6 +554,9 @@ static inline void nop(registers_t *cpu) {
 }
 
 static inline void stop(registers_t *cpu) {
+  cpu->bus->timers.DIV = 0;
+  cpu->bus->timers.div_count = 0;
+
   cpu->stopped = true;
   TICK(cpu, 4);
 }
@@ -1441,7 +1448,7 @@ void load_rom(registers_t *cpu, const char *path) {
   printf("Loaded ROM %s\n", path);
 }
 
-static inline int service_interrupt(registers_t *cpu) {
+int service_interrupt(registers_t *cpu) {
   u8 req = cpu->bus->IF & cpu->bus->IE;
   if (!cpu->IME || !req) return 0;
 
@@ -1466,50 +1473,23 @@ static inline int service_interrupt(registers_t *cpu) {
   return 0;
 }
 
-static inline void halt_wake(registers_t *cpu) {
+void halt_wake(registers_t *cpu) {
   if (!cpu->halt) return;
   if (cpu->bus->IF & cpu->bus->IE) {
     cpu->halt = false;
   }
 }
 
-
-int main(int argc, char *argv[]) {
-#ifdef TESTING
-    run_tests();
-#endif
-
-    if (argc < 2) {
-      fprintf(stderr, "LOL\n");
-      return 1;
-    }
-
-    Bus_t *bus = (Bus_t*)malloc(sizeof(Bus_t));
-
-    if (!bus) {
-      perror("malloc fail");
-      return 1;
-    }
-
-    init_bus(bus);
-    if (bus_load_rom(bus, argv[1]) != 0) return 1;
-
-    registers_t cpu; 
-    RESET_CPU(&cpu);
-    cpu.bus = bus;
-    unsigned long long max_cycles = 500000000000ULL;
-    for (;;) {
-      if (cpu.cycle > max_cycles) {
-	//fprintf(stderr, "Cycle cap hit. Dumping trace:\n");
-	//trace_dump_last(256);
-	exit(1);
-      }
-      halt_wake(&cpu);
-      if (service_interrupt(&cpu)) continue;
-      if (cpu.halt) continue;
-      cpu_go(&cpu);
+void stop_wake(registers_t *cpu) {
+  if (!cpu->stopped) {
+    return;
+  }
+  if (cpu->bus->IF & cpu->bus->IE & JOYP_IF) {
+    cpu->stopped =false;
   }
 }
+
+
 
 
 

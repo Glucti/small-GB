@@ -40,6 +40,12 @@ typedef struct {
 } registers_t; 
 
 void cpu_go(registers_t *cpu);
+void RESET_CPU(registers_t *cpu);
+void halt_wake(registers_t *cpu);
+int service_interrupt(registers_t *cpu);
+u8 fetch8(registers_t *cpu);
+void stop_wake(registers_t *cpu);
+u16 fetch16(registers_t *cpu);
 
 
 

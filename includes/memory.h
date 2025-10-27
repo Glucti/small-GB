@@ -1,5 +1,7 @@
 #pragma once
 #include <stdint.h>
+#include "mbc.h"
+#include "timers.h"
 
 /*
 
@@ -15,10 +17,13 @@
   FF00-FF7F   I/O Ports
   FF80-FFFE   High RAM (HRAM)
   FFFF        Interrupt Enable Register
-
  */
 
 typedef struct Bus {
+  Cartridge_t *cartridge;
+  Timers_t timers;
+
+
   uint8_t rom[0x8000];
 
   uint8_t wram[0x2000];
@@ -31,7 +36,6 @@ typedef struct Bus {
   uint8_t IF;
   uint8_t JOYP;
   uint8_t SB, SC;
-  uint8_t DIV, TIMA, TMA, TAC;
 } Bus_t;
 
 void init_bus(Bus_t* b);

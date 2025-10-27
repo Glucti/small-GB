@@ -1,31 +1,24 @@
 #include <string.h> 
-#include "memory.h"
 #include <stdio.h>
+#include "memory.h"
+#include "mbc.h"
 
 void init_bus(Bus_t* b) {
   memset(b, 0, sizeof(*b));
+  timers_init(&b->timers);
   b->JOYP = 0xFF; // all buttons released
 }
 
-int bus_load_rom(Bus_t *bus, const char* path) {
-  FILE* f = fopen(path, "rb");
-  if (!f) { 
-    perror("Failed to open ROM"); 
-    return -1;
-  }
-  size_t size = fread(bus->rom, 1, sizeof(bus->rom), f);
-  fclose(f);
-  if (size == 0) {
-    fprintf(stderr, "ROM is empty\n");
-    return -1;
-  }
-  return 0;
+
+int bus_load_rom(Bus_t *bus, const char *path) {
+  bus->cartridge = load_cart(path);
+  return bus->cartridge ? 0 : 1;
 }
 
 uint8_t read_byte_bus(Bus_t *bus, uint16_t addy) {
-  if (addy < 0x8000) return bus->rom[addy];
+  if (addy < 0x8000) return cart_read(bus->cartridge, addy);
   if (addy <= 0x9FFF) return bus->vram[addy - 0x8000];
-  if (addy >= 0xA000 && addy <= 0xBFFF) return 0xFF; // cart ram not implemented
+  if (addy >= 0xA000 && addy <= 0xBFFF) return cart_read(bus->cartridge, addy); 
   if (addy >= 0xC000 && addy <= 0xDFFF) return bus->wram[addy - 0xC000];
   if (addy >= 0xE000 && addy <= 0xFDFF) return bus->wram[addy - 0xE000];
   if (addy >= 0xFE00 && addy <= 0xFE9F) return bus->oam[addy - 0xFE00];
@@ -39,13 +32,10 @@ uint8_t read_byte_bus(Bus_t *bus, uint16_t addy) {
     case 0xFF02:
       return bus->SC;
     case 0xFF04:
-      return bus->DIV;
     case 0xFF05: 
-      return bus->TIMA;
     case 0xFF06:
-      return bus->TMA;
     case 0xFF07:
-      return bus->TAC;
+      return timers_read(&bus->timers, addy);
     case 0xFF0F:
       return bus->IF;
     default: break;
@@ -59,12 +49,18 @@ uint8_t read_byte_bus(Bus_t *bus, uint16_t addy) {
 }
 
 void write_byte_bus(Bus_t *bus, uint16_t addy, uint8_t val) {
-  if (addy < 0x8000) return;
+  if (addy < 0x8000) {
+    cart_write(bus->cartridge, addy, val);
+    return;
+  };
   if (addy <= 0x9FFF) {
     bus->vram[addy - 0x8000] = val;
     return;
   } 
-  if (addy >= 0xA000 && addy <= 0xBFFF) return; // cart ram not implemented
+  if (addy >= 0xA000 && addy <= 0xBFFF) {
+    cart_write(bus->cartridge, addy, val);
+    return;
+  };
   if (addy >= 0xC000 && addy <= 0xDFFF) {
     bus->wram[addy - 0xC000] = val;
     return;
@@ -97,13 +93,11 @@ void write_byte_bus(Bus_t *bus, uint16_t addy, uint8_t val) {
       }
       return;
     case 0xFF04:
-      bus->DIV = 0; return;
     case 0xFF05: 
-      bus->TIMA = val; return;
     case 0xFF06:
-      bus->TMA = val; return;
     case 0xFF07:
-      bus->TAC = val & 0x07; return;
+      timers_write(&bus->timers, addy, val);
+      return;
     case 0xFF0F:
       bus->IF = val & 0x1F; return;
     default: break;

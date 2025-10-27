@@ -1,6 +1,8 @@
 emulator
 tests
-gb-test-roms
+/testing_frame
+.clangd
+/build
 
 *.o
 *.out
