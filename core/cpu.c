@@ -801,7 +801,7 @@ static inline void or_r(registers_t *cpu) { /* untested */
 static inline u16 pop(registers_t *cpu) {
   u8 lsb = read8(cpu, cpu->SP++);
   u8 msb = read8(cpu, cpu->SP++);
-  return (msb << 8) | lsb;
+  return (u16)((msb << 8) | lsb);
 }
 
 static inline void ret_nz(registers_t *cpu) {
@@ -851,7 +851,7 @@ static inline void push(registers_t *cpu, u16 val) {
   cpu->SP--;
   write8(cpu, cpu->SP, (u8)(val >> 8));
   cpu->SP--;
-  write8(cpu, cpu->SP, (u8)val & 0xFF);
+  write8(cpu, cpu->SP, (u8)(val & 0xFF));
 }
 
 static inline void pop_rr(registers_t *cpu) {

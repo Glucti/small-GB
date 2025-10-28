@@ -80,11 +80,11 @@ void write_byte_bus(Bus_t *bus, uint16_t addy, uint8_t val) {
       bus->JOYP = val; return;
     case 0xFF01: 
       bus->SB = val;
-      fprintf(stderr, "[SB<=%03X '%c']\n", val, (val>=32&&val<127)?val:'.');
+      //fprintf(stderr, "[SB<=%03X '%c']\n", val, (val>=32&&val<127)?val:'.');
       return;
     case 0xFF02:
       bus->SC = val;
-      fprintf(stderr, "[SC<=%02X] PC=%04X\n", val, /* you can’t see cpu here */ 0);
+      //fprintf(stderr, "[SC<=%02X] PC=%04X\n", val, /* you can’t see cpu here */ 0);
       if (val & 0x80) {
 	putchar((char)bus->SB);
 	fflush(stdout);
