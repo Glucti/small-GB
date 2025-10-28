@@ -36,6 +36,7 @@ typedef struct {
   bool stopped;
   bool halt;
   bool IME;
+  bool ime_pending;
 
 } registers_t; 
 
@@ -46,6 +47,7 @@ int service_interrupt(registers_t *cpu);
 u8 fetch8(registers_t *cpu);
 void stop_wake(registers_t *cpu);
 u16 fetch16(registers_t *cpu);
+void helper(registers_t *cpu);
 
 
 

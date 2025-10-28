@@ -37,7 +37,7 @@ uint8_t read_byte_bus(Bus_t *bus, uint16_t addy) {
     case 0xFF07:
       return timers_read(&bus->timers, addy);
     case 0xFF0F:
-      return bus->IF;
+      return (uint8_t)(0xE0 | (bus->IF & 0x1F));
     default: break;
   }
 
@@ -80,11 +80,11 @@ void write_byte_bus(Bus_t *bus, uint16_t addy, uint8_t val) {
       bus->JOYP = val; return;
     case 0xFF01: 
       bus->SB = val;
-      //fprintf(stderr, "[SB<=%02X '%c']\n", val, (val>=32&&val<127)?val:'.');
+      fprintf(stderr, "[SB<=%03X '%c']\n", val, (val>=32&&val<127)?val:'.');
       return;
     case 0xFF02:
       bus->SC = val;
-      //fprintf(stderr, "[SC<=%02X] PC=%04X\n", val, /* you can’t see cpu here */ 0);
+      fprintf(stderr, "[SC<=%02X] PC=%04X\n", val, /* you can’t see cpu here */ 0);
       if (val & 0x80) {
 	putchar((char)bus->SB);
 	fflush(stdout);
@@ -99,7 +99,9 @@ void write_byte_bus(Bus_t *bus, uint16_t addy, uint8_t val) {
       timers_write(&bus->timers, addy, val);
       return;
     case 0xFF0F:
-      bus->IF = val & 0x1F; return;
+      bus->IF = (bus->IF & ~0x1F) | (val & 0x1F); 
+      fprintf(stderr, "[IF<=%02X] IF now %02X IE %02X\n", val, bus->IF, bus->IE);
+      return;
     default: break;
   }
 
@@ -108,6 +110,7 @@ void write_byte_bus(Bus_t *bus, uint16_t addy, uint8_t val) {
     return;
   }
   if (addy == 0xFFFF) {
-    bus->IE = val & 0x1F; return;
+    bus->IE = (val & 0x1F); 
+    return;
   }
 }

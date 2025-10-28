@@ -1139,7 +1139,7 @@ static inline void ld_a_a16(registers_t *cpu) {
 }
 
 static inline void ei(registers_t *cpu) {
-  cpu->IME = true;
+  cpu->ime_pending = true;
   TICK(cpu, 4);
 }
 
@@ -1427,10 +1427,13 @@ void cpu_go(registers_t *cpu) {
     //debug_state(cpu, opcode);
     if (opcodes[opcode]) opcodes[opcode](cpu);
     else {
-      fprintf(stderr, "Unimplemented opcode: 0x%02X\n", opcode);
-      trace_dump_last(182);
       exit(1);
     } 
+
+    if (cpu->ime_pending) {
+      cpu->IME = 1;
+      cpu->ime_pending = false;
+    }
 }
 
 
@@ -1449,7 +1452,7 @@ void load_rom(registers_t *cpu, const char *path) {
 }
 
 int service_interrupt(registers_t *cpu) {
-  u8 req = cpu->bus->IF & cpu->bus->IE;
+  u8 req = (cpu->bus->IF & cpu->bus->IE) & 0x1F;
   if (!cpu->IME || !req) return 0;
 
   cpu->halt = false;
@@ -1489,9 +1492,34 @@ void stop_wake(registers_t *cpu) {
   }
 }
 
+void helper(registers_t *cpu) {
 
+  stop_wake(cpu);
+  halt_wake(cpu);		
 
+   if (service_interrupt(cpu)) return;
 
+  if (cpu->stopped) {
+    return;
+  }
 
+  if (cpu->halt) {
+    TICK(cpu, 4);   
+    return;
+  }
 
+  uint8_t opcode = fetch8(cpu);
+  trace_log(cpu, opcode);
+  if (opcodes[opcode]) opcodes[opcode](cpu);
+  else { 
+    //fprintf(stderr, "Cycle cap hit. Dumping trace:\n");
+    //trace_dump_last(256);
+    exit(1);
+  }
+
+  if (cpu->ime_pending) {
+    cpu->IME = 1;
+    cpu->ime_pending = false;
+  }
+}
 

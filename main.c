@@ -27,16 +27,9 @@ int main(int argc, char *argv[]) {
     RESET_CPU(&cpu);
     cpu.bus = bus;
     unsigned long long max_cycles = 50000000000ULL;
+
     for (;;) {
-      if (cpu.cycle > max_cycles) {
-	//fprintf(stderr, "Cycle cap hit. Dumping trace:\n");
-	//trace_dump_last(256);
-	exit(1);
-      }
-      halt_wake(&cpu);
-      stop_wake(&cpu);
-      if (service_interrupt(&cpu)) continue;
-      if (cpu.halt) continue;
-      cpu_go(&cpu);
+      if (cpu.cycle > max_cycles) exit(1);
+      helper(&cpu);
   }
 }
