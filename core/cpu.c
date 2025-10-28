@@ -1024,7 +1024,7 @@ static inline void add_sp_n8(registers_t *cpu) {
 
 static inline void jp_hl(registers_t *cpu) {
   cpu->PC = cpu->HL;
-  TICK(cpu, 8);
+  TICK(cpu, 4);
 }
 
 static inline void ld_a16_a(registers_t *cpu) {
