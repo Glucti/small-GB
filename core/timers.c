@@ -14,10 +14,10 @@ static uint16_t select_tima(uint8_t tac) {
 void tick_timers(Timers_t *timers, uint32_t cycles, uint8_t *IF_REG) {
   timers->div_count += cycles;
 
-  timers->DIV = (uint16_t)cycles;
+  timers->DIV += (uint16_t)cycles;
 
   if (timers->tima_overflow) {
-    timers->overflow_delay -= (uint16_t)cycles;
+    timers->overflow_delay -= (int16_t)cycles;
     if (timers->overflow_delay <= 0) {
       timers->tima_overflow = false;
       timers->TIMA = timers->TMA;

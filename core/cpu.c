@@ -4,6 +4,7 @@
 #include "cpu.h"
 #include "memory.h"
 #include "timers.h"
+#include "interrupts.h"
 
 #define TRACE_LEN 4096
 typedef struct {
@@ -79,7 +80,7 @@ static inline u8 read8(registers_t *cpu, u16 addy) {
 }
 
 static inline void write8(registers_t *cpu, u16 addy, u8 val) {
-  return write_byte_bus(cpu->bus, addy, val);
+  write_byte_bus(cpu->bus, addy, val);
 }
 
 static inline u16 read16(registers_t *cpu, u16 addy) {
@@ -91,7 +92,16 @@ static inline void write16(registers_t *cpu, u16 addy, u16 val) {
 }
 
 u8 fetch8(registers_t *cpu) {
-  return read8(cpu, cpu->PC++);
+  //return read8(cpu, cpu->PC++);
+  uint16_t pc = cpu->PC;
+  uint8_t  op = read8(cpu, pc);
+
+  if (cpu->halt_bug) {
+      cpu->halt_bug = false;
+  } else {
+      cpu->PC = pc + 1;
+  }
+  return op;
 }
 
 u16 fetch16(registers_t *cpu) {
@@ -365,8 +375,20 @@ static inline void ld_r_r(registers_t *cpu) {
 }
 
 static inline void halt(registers_t *cpu) {
-  cpu->halt = true;
-  TICK(cpu, 4);
+  const u8 pending = (cpu->bus->IF & cpu->bus->IE) & 0x1F;
+
+  if (cpu->IME) {
+    cpu->halt = true;
+    return;
+  }
+
+  if (pending) {
+    cpu->halt_bug = true;
+    return;
+  } else {
+    cpu->halt = true;
+    return;
+  }
 }
 
 // rotates
@@ -846,7 +868,6 @@ static inline void ret(registers_t *cpu) {
 }
 
 
-
 static inline void push(registers_t *cpu, u16 val) {
   cpu->SP--;
   write8(cpu, cpu->SP, (u8)(val >> 8));
@@ -972,8 +993,8 @@ void prefix(registers_t *cpu) {
 }
 
 static inline void reti(registers_t *cpu) {
-  cpu->PC = pop(cpu);
   cpu->IME = 1;
+  cpu->PC = pop(cpu);
   TICK(cpu, 16);
 }
 
@@ -1424,7 +1445,7 @@ void debug_state(registers_t *cpu, u8 opcode) {
 void cpu_go(registers_t *cpu) {
     u8 opcode = fetch8(cpu);
     trace_log(cpu, opcode);
-    //debug_state(cpu, opcode);
+    debug_state(cpu, opcode);
     if (opcodes[opcode]) opcodes[opcode](cpu);
     else {
       exit(1);
@@ -1451,71 +1472,31 @@ void load_rom(registers_t *cpu, const char *path) {
   printf("Loaded ROM %s\n", path);
 }
 
-int service_interrupt(registers_t *cpu) {
-  u8 req = (cpu->bus->IF & cpu->bus->IE) & 0x1F;
-  if (!cpu->IME || !req) return 0;
 
-  cpu->halt = false;
-  cpu->IME = 0;
-
-  int which = -1;
-  if (req & 0x01) which = 0;
-  else if (req & 0x02) which = 1;
-  else if (req & 0x04) which = 2;
-  else if (req & 0x08) which = 3;
-  else if (req & 0x10) which = 4;
-
-  if (which >= 0) {
-    cpu->bus->IF &= ~(1 << which);
-
-    push(cpu, cpu->PC);
-    cpu->PC = (u16)(0x40 + (which * 8));
-    TICK(cpu, 20);
-    return 1;
-  }
-  return 0;
-}
-
-void halt_wake(registers_t *cpu) {
-  if (!cpu->halt) return;
-  if (cpu->bus->IF & cpu->bus->IE) {
-    cpu->halt = false;
-  }
-}
-
-void stop_wake(registers_t *cpu) {
-  if (!cpu->stopped) {
-    return;
-  }
-  if (cpu->bus->IF & cpu->bus->IE & JOYP_IF) {
-    cpu->stopped =false;
-  }
+static inline bool irq_pending(registers_t* c) {
+    return ((c->bus->IF & c->bus->IE) & 0x1F) != 0;
 }
 
 void helper(registers_t *cpu) {
-
-  stop_wake(cpu);
-  halt_wake(cpu);		
-
-   if (service_interrupt(cpu)) return;
-
-  if (cpu->stopped) {
+  if (cpu->halt) {
+    TICK(cpu, 4);
+    if (irq_pending(cpu)) {
+      cpu->halt = false;
+      if (cpu->IME) {
+	uint8_t ticks = handle_interrupts(cpu);
+	if (ticks) {TICK(cpu, ticks); return;}
+      }
+    }
     return;
   }
 
-  if (cpu->halt) {
-    TICK(cpu, 4);   
-    return;
+  if (cpu->IME && irq_pending(cpu)) {
+    uint8_t ticks = handle_interrupts(cpu);
+    if (ticks) {TICK(cpu, ticks); return;}
   }
 
   uint8_t opcode = fetch8(cpu);
-  trace_log(cpu, opcode);
-  if (opcodes[opcode]) opcodes[opcode](cpu);
-  else { 
-    //fprintf(stderr, "Cycle cap hit. Dumping trace:\n");
-    //trace_dump_last(256);
-    exit(1);
-  }
+  opcodes[opcode](cpu);          
 
   if (cpu->ime_pending) {
     cpu->IME = 1;

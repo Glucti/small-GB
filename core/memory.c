@@ -100,7 +100,7 @@ void write_byte_bus(Bus_t *bus, uint16_t addy, uint8_t val) {
       return;
     case 0xFF0F:
       bus->IF = (bus->IF & ~0x1F) | (val & 0x1F); 
-      fprintf(stderr, "[IF<=%02X] IF now %02X IE %02X\n", val, bus->IF, bus->IE);
+      //fprintf(stderr, "[IF<=%02X] IF now %02X IE %02X\n", val, bus->IF, bus->IE);
       return;
     default: break;
   }

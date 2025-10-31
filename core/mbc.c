@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "mbc.h"
 
+
 mbc_t get_cartridge_type(uint8_t type) {
   switch(type) {
     case 0x00: 
@@ -166,7 +167,7 @@ static inline void write_mbc0(Cartridge_t *cart, uint16_t addy, uint8_t val) {
 
 static inline uint8_t read_mbc_bytes(Cartridge_t *cart, uint32_t bank_num, uint16_t addy) {
   // skip legacy
-  bank_num %= cart->rom_banks;
+  //bank_num %= cart->rom_banks;
 
   uint32_t base = bank_num * 0x4000u;
   uint32_t offset = base + (addy & 0x3FFF);
@@ -177,24 +178,30 @@ static inline uint8_t read_mbc_bytes(Cartridge_t *cart, uint32_t bank_num, uint1
 /* --------------- MBC1 --------------- */
 
 uint8_t read_mbc1(Cartridge_t *cart, uint16_t addy) {
-  bool large_rom = (cart->rom_banks >= 64); // larger than 1MB
+  bool large_rom = (cart->rom_banks >= 32); // larger than 1MB
+
   if (addy < 0x4000) {
+    bool large_rom = (cart->rom_banks >= 32);
     if (cart->mode == 1 && large_rom) {
       uint32_t bank = ((uint32_t)(cart->ram_bank & 0x03)) << 5;
+      if (bank >= cart->rom_banks) bank %= cart->rom_banks;
       return read_mbc_bytes(cart, bank, addy);
-    } 
+    }
     return read_mbc_bytes(cart, 0, addy);
-  }
+}
+
 
   if (addy >= 0x4000 && addy <= 0x7FFF) {
+    bool large_rom = (cart->rom_banks >= 32);  
     uint32_t low5 = (uint32_t)(cart->rom_bank & 0x1F);
-    uint32_t hi2 = (large_rom == true) ? (uint32_t)(cart->ram_bank & 0x03) : 0;
-    uint32_t bank = low5 | (hi2 << 5);
-    // if low 5 bits are 0 bump the bank by 1
-    if ((bank & 0x1F) == 0) bank |= 1;
+    uint32_t hi2  = large_rom ? (uint32_t)(cart->ram_bank & 0x03) : 0;
+    uint32_t bank = (hi2 << 5) | low5;
+
+    if (bank >= cart->rom_banks) bank %= cart->rom_banks;
+    if ((bank & 0x1F) == 0) bank |= 1;          
 
     return read_mbc_bytes(cart, bank, addy);
-  }
+}
 
   if (addy >= 0xA000 && addy <= 0xBFFF) {
     if (!cart->ram || !cart->ram_enable) return 0xFF;
@@ -209,7 +216,7 @@ uint8_t read_mbc1(Cartridge_t *cart, uint16_t addy) {
 }
 
 void write_mbc1(Cartridge_t *cart, uint16_t addy, uint8_t val) {
-  bool large_rom = (cart->rom_banks >= 64); // larger than 1MB
+  bool large_rom = (cart->rom_banks >= 32); // larger than 1MB
   if (addy < 0x2000) {
     cart->ram_enable = ((val & 0x0F) == 0xA);
     //fprintf(stderr, "[MBC1] RAM_ENABLE=%d\n", cart->ram_enable);
@@ -217,14 +224,15 @@ void write_mbc1(Cartridge_t *cart, uint16_t addy, uint8_t val) {
   }
 
   if (addy >= 0x2000 && addy <= 0x3FFF) {
-    cart->rom_bank = (val & 0x1F);
+    uint8_t low5 = val & 0x1F;
+    if (low5 == 0) low5 = 1;                  
+    cart->rom_bank = (cart->rom_bank & ~0x1F) | low5;
     //fprintf(stderr, "[MBC1] ROM_BANK lower 5 = %u\n", cart->rom_bank & 0x1F);
     return;
     }
   
   if (addy >= 0x4000 && addy <= 0x5FFF) {
     cart->ram_bank = (val & 0x03);
-    //fprintf(stderr, "[MBC1] RAM_BANK HI2 = %u\n", cart->ram_bank & 3);
     return;
   }
 
