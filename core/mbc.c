@@ -2,7 +2,24 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <time.h>
 #include "mbc.h"
+
+static const uint32_t MBC3_SECONDS_PER_DAY = 24u * 60u * 60u;
+static const uint16_t MBC3_DAY_MAX = 512u;
+
+static void mbc3_rtc_update_regs(Cartridge_t *cart);
+static void mbc3_rtc_tick(Cartridge_t *cart);
+static void mbc3_rtc_get_components(const Cartridge_t *cart,
+                                    uint16_t *days,
+                                    uint8_t *hours,
+                                    uint8_t *minutes,
+                                    uint8_t *seconds);
+static void mbc3_rtc_set_components(Cartridge_t *cart,
+                                    uint16_t days,
+                                    uint8_t hours,
+                                    uint8_t minutes,
+                                    uint8_t seconds);
 
 
 mbc_t get_cartridge_type(uint8_t type) {
@@ -128,6 +145,15 @@ Cartridge_t *load_cart(const char *path) {
   cart->ram_bank = 0;
   cart->mode = 0;
   cart->ram_enable = false;
+  memset(cart->rtc_regs, 0, sizeof(cart->rtc_regs));
+  memset(cart->rtc_latched_regs, 0, sizeof(cart->rtc_latched_regs));
+  cart->rtc_latched = false;
+  cart->rtc_halt = false;
+  cart->rtc_day_carry = false;
+  cart->rtc_total_seconds = 0;
+  cart->rtc_latch_prev = 0;
+  cart->rtc_last_update = time(NULL);
+  if (cart->rtc_last_update == (time_t)-1) cart->rtc_last_update = 0;
   fprintf(stderr,
     "[cart] type=%d (hdr=%02X)  rom_banks=%u  file=%zu bytes  "
     "rom_code=%02X  ram_code=%02X  ram_banks=%u\n",
@@ -171,7 +197,100 @@ static inline uint8_t read_mbc_bytes(Cartridge_t *cart, uint32_t bank_num, uint1
   uint32_t base = bank_num * 0x4000u;
   uint32_t offset = base + (addy & 0x3FFF);
 
-  return (offset < cart->rom_size) ? cart->rom[offset] : 0xFF;
+  if (offset < cart->rom_size) {
+    return cart->rom[offset];
+  }
+
+  static int warn_count = 0;
+  if (warn_count < 16) {
+    fprintf(stderr,
+      "[MBC] ROM read OOB: bank=%u addy=%04X offset=%u size=%zu\n",
+      bank_num, addy, offset, cart->rom_size);
+    warn_count++;
+  }
+  return 0xFF;
+}
+
+static void mbc3_rtc_get_components(const Cartridge_t *cart,
+                                    uint16_t *days,
+                                    uint8_t *hours,
+                                    uint8_t *minutes,
+                                    uint8_t *seconds) {
+  uint32_t total = cart->rtc_total_seconds;
+  uint32_t day_count = total / MBC3_SECONDS_PER_DAY;
+  uint32_t remainder = total % MBC3_SECONDS_PER_DAY;
+
+  uint8_t hour_val = (uint8_t)(remainder / 3600u);
+  remainder %= 3600u;
+  uint8_t minute_val = (uint8_t)(remainder / 60u);
+  uint8_t second_val = (uint8_t)(remainder % 60u);
+
+  if (days)    *days = (uint16_t)(day_count % MBC3_DAY_MAX);
+  if (hours)   *hours = hour_val;
+  if (minutes) *minutes = minute_val;
+  if (seconds) *seconds = second_val;
+}
+
+static void mbc3_rtc_update_regs(Cartridge_t *cart) {
+  uint16_t days;
+  uint8_t hours, minutes, seconds;
+  mbc3_rtc_get_components(cart, &days, &hours, &minutes, &seconds);
+
+  cart->rtc_regs[0] = (uint8_t)(seconds % 60u);
+  cart->rtc_regs[1] = (uint8_t)(minutes % 60u);
+  cart->rtc_regs[2] = (uint8_t)(hours % 24u);
+  cart->rtc_regs[3] = (uint8_t)(days & 0xFFu);
+
+  uint8_t dh = (uint8_t)((days >> 8) & 0x01u);
+  if (cart->rtc_halt) dh |= 0x40u;
+  if (cart->rtc_day_carry) dh |= 0x80u;
+  cart->rtc_regs[4] = dh;
+}
+
+static void mbc3_rtc_set_components(Cartridge_t *cart,
+                                    uint16_t days,
+                                    uint8_t hours,
+                                    uint8_t minutes,
+                                    uint8_t seconds) {
+  days %= MBC3_DAY_MAX;
+  hours %= 24u;
+  minutes %= 60u;
+  seconds %= 60u;
+
+  cart->rtc_total_seconds =
+    (uint32_t)days * MBC3_SECONDS_PER_DAY +
+    (uint32_t)hours * 3600u +
+    (uint32_t)minutes * 60u +
+    (uint32_t)seconds;
+
+  mbc3_rtc_update_regs(cart);
+}
+
+static void mbc3_rtc_tick(Cartridge_t *cart) {
+  time_t now = time(NULL);
+  if (now == (time_t)-1) {
+    now = cart->rtc_last_update;
+  }
+
+  if (cart->rtc_last_update == 0) {
+    cart->rtc_last_update = now;
+  }
+
+  if (!cart->rtc_halt && now > cart->rtc_last_update) {
+    time_t delta = now - cart->rtc_last_update;
+    if (delta > 0) {
+      uint64_t total = (uint64_t)cart->rtc_total_seconds + (uint64_t)delta;
+      uint64_t limit = (uint64_t)MBC3_DAY_MAX * (uint64_t)MBC3_SECONDS_PER_DAY;
+      if (total >= limit) {
+        cart->rtc_day_carry = true;
+        total %= limit;
+      }
+      cart->rtc_total_seconds = (uint32_t)total;
+    }
+  }
+
+  cart->rtc_last_update = now;
+  mbc3_rtc_update_regs(cart);
 }
 
 /* --------------- MBC1 --------------- */
@@ -191,19 +310,26 @@ uint8_t read_mbc1(Cartridge_t *cart, uint16_t addy) {
 
   if (addy >= 0x4000 && addy <= 0x7FFF) {  
     uint32_t low5 = (uint32_t)(cart->rom_bank & 0x1F);
-    uint32_t hi2  = large_rom ? (uint32_t)(cart->ram_bank & 0x03) : 0;
+    uint32_t hi2  = (large_rom && cart->mode == 0)
+                      ? (uint32_t)(cart->ram_bank & 0x03)
+                      : 0;
     uint32_t bank = (hi2 << 5) | low5;
 
     if (bank >= cart->rom_banks) bank %= cart->rom_banks;
     if ((bank & 0x1F) == 0) bank |= 1;          
 
+    static int log_cnt = 0;
+    if (log_cnt < 32) {
+      fprintf(stderr, "[MBC1] ROM read bank=%u pc_bank=%u hi=%u mode=%u\n",
+              bank, cart->rom_bank & 0x1F, hi2, cart->mode);
+      log_cnt++;
+    }
     return read_mbc_bytes(cart, bank, addy);
 }
 
   if (addy >= 0xA000 && addy <= 0xBFFF) {
     if (!cart->ram || !cart->ram_enable) return 0xFF;
-    uint32_t bank = 0;
-    if (!large_rom && cart->mode == 1) bank = (uint32_t)(cart->ram_bank & 0x03);
+    uint32_t bank = (cart->mode == 1) ? (uint32_t)(cart->ram_bank & 0x03) : 0;
     bank %= (cart->ram_banks ? cart->ram_banks : 1);
     size_t off = bank * 0x2000u + (addy - 0xA000);
     return (off < cart->ram_size) ? cart->ram[off] : 0xFF;
@@ -216,7 +342,11 @@ void write_mbc1(Cartridge_t *cart, uint16_t addy, uint8_t val) {
   bool large_rom = (cart->rom_banks >= 32); // larger than 1MB
   if (addy < 0x2000) {
     cart->ram_enable = ((val & 0x0F) == 0xA);
-    //fprintf(stderr, "[MBC1] RAM_ENABLE=%d\n", cart->ram_enable);
+    static int log_cnt = 0;
+    if (log_cnt < 16) {
+      fprintf(stderr, "[MBC1] RAM enable <= %d (val=%02X)\n", cart->ram_enable, val);
+      log_cnt++;
+    }
     return; 
   }
 
@@ -224,18 +354,33 @@ void write_mbc1(Cartridge_t *cart, uint16_t addy, uint8_t val) {
     uint8_t low5 = val & 0x1F;
     if (low5 == 0) low5 = 1;                  
     cart->rom_bank = (cart->rom_bank & ~0x1F) | low5;
-    //fprintf(stderr, "[MBC1] ROM_BANK lower 5 = %u\n", cart->rom_bank & 0x1F);
+    static int log_cnt = 0;
+    if (log_cnt < 32) {
+      fprintf(stderr, "[MBC1] ROM bank low set -> %u (val=%02X)\n",
+              cart->rom_bank & 0x1F, val);
+      log_cnt++;
+    }
     return;
     }
   
   if (addy >= 0x4000 && addy <= 0x5FFF) {
     cart->ram_bank = (val & 0x03);
+    static int log_cnt = 0;
+    if (log_cnt < 32) {
+      fprintf(stderr, "[MBC1] RAM/ROM high bits set -> %u (val=%02X)\n",
+              cart->ram_bank & 0x03, val);
+      log_cnt++;
+    }
     return;
   }
 
   if (addy >= 0x6000 && addy <= 0x7FFF) {
     cart->mode = (val & 0x01);
-    //fprintf(stderr, "[MBC1] MODE = %u\n", cart->mode);
+    static int log_cnt = 0;
+    if (log_cnt < 16) {
+      fprintf(stderr, "[MBC1] MODE set -> %u (val=%02X)\n", cart->mode, val);
+      log_cnt++;
+    }
     return;
   }
 
@@ -243,7 +388,7 @@ void write_mbc1(Cartridge_t *cart, uint16_t addy, uint8_t val) {
     if (!cart->ram || !cart->ram_enable) 
       return;
 
-    uint32_t bank = (!large_rom && cart->mode == 1) ? (uint32_t)(cart->ram_bank & 0x03) : 0;
+    uint32_t bank = (cart->mode == 1) ? (uint32_t)(cart->ram_bank & 0x03) : 0;
     bank %= (cart->ram_banks ? cart->ram_banks : 1);
 
     size_t off = bank * 0x2000u + (addy - 0xA000);
@@ -251,12 +396,137 @@ void write_mbc1(Cartridge_t *cart, uint16_t addy, uint8_t val) {
   }
 }
 
+/* -------------- MBC3 ------------------- */
+uint8_t read_mbc3(Cartridge_t* cart, uint16_t addy) {
+  if (addy < 0x4000) {
+    return read_mbc_bytes(cart, 0, addy);
+  } else if (addy >= 0x4000 && addy <= 0x7FFF) {
+    uint32_t bank = cart->rom_bank & 0x7F;
+    if (cart->rom_banks) {
+      bank %= cart->rom_banks;
+      if (bank == 0 && cart->rom_banks > 1) bank = 1;
+    }
+    return read_mbc_bytes(cart, bank, addy);
+  } else if (addy >= 0xA000 && addy <= 0xBFFF) {
+    if (!cart->ram_enable)
+      return 0xFF;
+
+    if (cart->ram_bank <= 3 && cart->ram) {
+      uint8_t bank = cart->ram_bank;
+      uint16_t effective = cart->ram_banks ? cart->ram_banks : 1;
+      bank %= effective;
+      size_t off = ((size_t)bank * 0x2000u) + (addy - 0xA000);
+      if (off < cart->ram_size)
+	return cart->ram[off];
+      return 0xFF;
+    } else if (cart->ram_bank >= 0x08 && cart->ram_bank <= 0x0C) {
+      uint8_t index = (uint8_t)(cart->ram_bank - 0x08);
+      if (!cart->rtc_latched) {
+	mbc3_rtc_tick(cart);
+	return cart->rtc_regs[index];
+      }
+      return cart->rtc_latched_regs[index];
+    }
+  }
+  return 0xFF;
+} 
+
+void write_mbc3(Cartridge_t *cart, uint16_t addy, uint8_t val) {
+  if (addy < 0x2000) {
+    cart->ram_enable = ((val & 0x0F) == 0x0A);
+    return;
+  }
+  if (addy >= 0x2000 && addy < 0x3FFF) {
+    uint16_t bank = (uint16_t)(val & 0x7F);
+    if (bank == 0) bank = 1;
+    if (cart->rom_banks) {
+      bank %= cart->rom_banks;
+      if (bank == 0 && cart->rom_banks > 1) bank = 1;
+      if (cart->rom_banks == 1) bank = 0;
+    }
+    cart->rom_bank = (uint8_t)bank;
+    return;
+  }
+
+  if (addy >= 0x4000 && addy <= 0x5FFF) {
+    cart->ram_bank = val;
+    return;
+  }
+  if (addy >= 0x6000 && addy <= 0x7FFF) {
+    uint8_t latch_val = val & 0x01u;
+    if (cart->rtc_latch_prev == 0 && latch_val == 1) {
+      mbc3_rtc_tick(cart);
+      memcpy(cart->rtc_latched_regs, cart->rtc_regs, sizeof(cart->rtc_regs));
+      cart->rtc_latched = true;
+    }
+    if (latch_val == 0) {
+      cart->rtc_latched = false;
+    }
+    cart->rtc_latch_prev = latch_val;
+    return;
+  }
+
+  if (addy >= 0xA000 && addy <= 0xBFFF && cart->ram_enable) {
+    if (cart->ram_bank <= 3 && cart->ram) {
+      uint8_t bank = cart->ram_bank;
+      uint16_t effective = cart->ram_banks ? cart->ram_banks : 1;
+      bank %= effective;
+      size_t off = ((size_t)bank * 0x2000u) + (addy - 0xA000);
+      if (off < cart->ram_size)
+	cart->ram[off] = val;
+    } else if (cart->ram_bank >= 0x08 && cart->ram_bank <= 0x0C) {
+      mbc3_rtc_tick(cart);
+
+      uint16_t days;
+      uint8_t hours, minutes, seconds;
+      mbc3_rtc_get_components(cart, &days, &hours, &minutes, &seconds);
+
+      switch (cart->ram_bank) {
+	case 0x08:
+	  seconds = (uint8_t)(val % 60u);
+	  break;
+	case 0x09:
+	  minutes = (uint8_t)(val % 60u);
+	  break;
+	case 0x0A:
+	  hours = (uint8_t)(val % 24u);
+	  break;
+	case 0x0B:
+	  days = (uint16_t)((days & 0x100u) | val);
+	  days %= MBC3_DAY_MAX;
+	  break;
+	case 0x0C: {
+	  uint16_t new_days = (uint16_t)(((uint16_t)(val & 0x01u) << 8) | (days & 0xFFu));
+	  days = new_days % MBC3_DAY_MAX;
+
+	  bool halt = (val & 0x40u) != 0;
+	  if (cart->rtc_halt != halt) {
+	    cart->rtc_last_update = time(NULL);
+	    if (cart->rtc_last_update == (time_t)-1) cart->rtc_last_update = 0;
+	  }
+	  cart->rtc_halt = halt;
+	  cart->rtc_day_carry = (val & 0x80u) != 0;
+	  break;
+	}
+	default:
+	  break;
+      }
+
+      mbc3_rtc_set_components(cart, days, hours, minutes, seconds);
+    }
+  }
+}
+
+
+
 uint8_t cart_read(Cartridge_t *cart, uint16_t addy) {
   switch (cart->type) {
     case MBC_0:
       return read_mbc0(cart, addy);
     case MBC_1:
       return read_mbc1(cart, addy);
+    case MBC_3:
+      return read_mbc3(cart, addy);
     default:
       return read_mbc0(cart, addy);
   }
@@ -268,9 +538,11 @@ void cart_write(Cartridge_t *cart, uint16_t addy, uint8_t val) {
       return write_mbc0(cart, addy, val);
     case MBC_1:
       return write_mbc1(cart, addy, val);
+    case MBC_3:
+      return write_mbc3(cart, addy, val);
     default:
       return write_mbc0(cart, addy, val);
-  }
+  } 
 }
 
 

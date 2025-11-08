@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <time.h>
 
 typedef enum {
   MBC_0 = 0,
@@ -25,6 +26,16 @@ typedef struct Cartridge {
 
   uint16_t rom_banks;
   uint16_t ram_banks;
+
+  uint8_t rtc_regs[5];	// 0 S | 1 M | 2 H | 3 DL | 4 DH
+  uint8_t rtc_reg_select;
+  bool rtc_latched;
+  uint8_t rtc_latched_regs[5];
+  bool rtc_halt;
+  bool rtc_day_carry;
+  time_t rtc_last_update;
+  uint32_t rtc_total_seconds;
+  uint8_t rtc_latch_prev;
 } Cartridge_t;
 
 Cartridge_t *load_cart(const char *path);

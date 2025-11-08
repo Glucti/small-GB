@@ -54,10 +54,24 @@ void (*cb_ops[256])(registers_t *cpu);
 
 // helpers
 static inline u8 read8(registers_t *cpu, u16 addy) {
+  if (cpu->ppu && cpu->ppu->dma_active) {
+    if (!(addy >= 0xFF80 && addy <= 0xFFFE)) {
+      while (cpu->ppu->dma_active) {
+        TICK(cpu, 4);
+      }
+    }
+  }
   return read_byte_bus(cpu->bus, addy);
 }
 
 static inline void write8(registers_t *cpu, u16 addy, u8 val) {
+  if (cpu->ppu && cpu->ppu->dma_active) {
+    if (!(addy >= 0xFF80 && addy <= 0xFFFE)) {
+      while (cpu->ppu->dma_active) {
+        TICK(cpu, 4);
+      }
+    }
+  }
   write_byte_bus(cpu->bus, addy, val);
 }
 
@@ -68,7 +82,8 @@ static inline u16 read16(registers_t *cpu, u16 addy) {
 }
 
 static inline void write16(registers_t *cpu, u16 addy, u16 val) {
-  bus_write16(cpu->bus, addy, val);
+  write8(cpu, addy, (u8)(val & 0xFF));
+  write8(cpu, addy + 1, (u8)(val >> 8));
 }
 
 u8 fetch8(registers_t *cpu) {
