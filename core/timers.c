@@ -14,7 +14,8 @@ static uint16_t select_tima(uint8_t tac) {
 void tick_timers(Timers_t *timers, uint32_t cycles, uint8_t *IF_REG) {
   timers->div_count += cycles;
 
-  timers->DIV += (uint16_t)cycles;
+  // DIV is upper 8 bits of 16-bit div counter, increments every 256 cycles
+  timers->DIV = (uint16_t)(timers->div_count >> 8);
 
   if (timers->tima_overflow) {
     timers->overflow_delay -= (int16_t)cycles;
@@ -66,8 +67,8 @@ void timers_write(Timers_t *t, uint16_t addy, uint8_t val) {
       return;
     case 0xFF05:
       if (t->tima_overflow) {
-	t->tima_overflow = false;
-	t->overflow_delay = 0;
+        t->tima_overflow = false;
+        t->overflow_delay = 0;
       }
       t->TIMA = val;
       return;

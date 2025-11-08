@@ -19,12 +19,17 @@
   FFFF        Interrupt Enable Register
  */
 
+struct Ppu;
+
 typedef struct Bus {
   Cartridge_t *cartridge;
   Timers_t timers;
+  struct Ppu *ppu;
 
 
   uint8_t rom[0x8000];
+  uint8_t *bootrom;
+  bool bootrom_enabled;
 
   uint8_t wram[0x2000];
   uint8_t hram[0x7F];
@@ -36,6 +41,9 @@ typedef struct Bus {
   uint8_t IF;
   uint8_t JOYP;
   uint8_t SB, SC;
+  // Button states (0=pressed, 1=released)
+  uint8_t buttons_dir;    // Direction buttons: bits 0=Right, 1=Left, 2=Up, 3=Down
+  uint8_t buttons_action; // Action buttons: bits 0=A, 1=B, 2=Select, 3=Start
 } Bus_t;
 
 void init_bus(Bus_t* b);

@@ -29,7 +29,7 @@ mbc_t get_cartridge_type(uint8_t type) {
 
 size_t get_cartridge_rom_size(uint8_t val) {
   if (val <= 8)
-    return (size_t)0x8000u << val; // should work, ignoring legacy
+    return (size_t)0x8000u << val; 
   switch (val) {
     case 0x52: 
       return 1152 * 1024;
@@ -168,7 +168,6 @@ static inline void write_mbc0(Cartridge_t *cart, uint16_t addy, uint8_t val) {
 static inline uint8_t read_mbc_bytes(Cartridge_t *cart, uint32_t bank_num, uint16_t addy) {
   // skip legacy
   //bank_num %= cart->rom_banks;
-
   uint32_t base = bank_num * 0x4000u;
   uint32_t offset = base + (addy & 0x3FFF);
 
@@ -178,10 +177,9 @@ static inline uint8_t read_mbc_bytes(Cartridge_t *cart, uint32_t bank_num, uint1
 /* --------------- MBC1 --------------- */
 
 uint8_t read_mbc1(Cartridge_t *cart, uint16_t addy) {
-  bool large_rom = (cart->rom_banks >= 32); // larger than 1MB
+  bool large_rom = (cart->rom_banks >= 32); 
 
   if (addy < 0x4000) {
-    bool large_rom = (cart->rom_banks >= 32);
     if (cart->mode == 1 && large_rom) {
       uint32_t bank = ((uint32_t)(cart->ram_bank & 0x03)) << 5;
       if (bank >= cart->rom_banks) bank %= cart->rom_banks;
@@ -191,8 +189,7 @@ uint8_t read_mbc1(Cartridge_t *cart, uint16_t addy) {
 }
 
 
-  if (addy >= 0x4000 && addy <= 0x7FFF) {
-    bool large_rom = (cart->rom_banks >= 32);  
+  if (addy >= 0x4000 && addy <= 0x7FFF) {  
     uint32_t low5 = (uint32_t)(cart->rom_bank & 0x1F);
     uint32_t hi2  = large_rom ? (uint32_t)(cart->ram_bank & 0x03) : 0;
     uint32_t bank = (hi2 << 5) | low5;

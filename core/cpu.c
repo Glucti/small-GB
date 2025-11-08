@@ -5,45 +5,23 @@
 #include "memory.h"
 #include "timers.h"
 #include "interrupts.h"
+#include "logging.h"
 
 #define TRACE_LEN 4096
-typedef struct {
-  u16 pc;
-  u8  op;
-  u8  a,b,c,d,e,h,l;
-  u16 sp, hl, de, bc;
-  u8  fz, fn, fh, fc;
-  unsigned long cyc;
-} Trace;
 
-static Trace tracebuf[TRACE_LEN];
-static size_t tracepos = 0;
-
-static inline void trace_log(registers_t *cpu, u8 op) {
-  Trace *t = &tracebuf[tracepos++ & (TRACE_LEN-1)];
-  t->pc = cpu->PC-1; t->op = op;
-  t->a = cpu->A; t->b = cpu->B; t->c = cpu->C;
-  t->d = cpu->D; t->e = cpu->E; t->h = cpu->H; t->l = cpu->L;
-  t->sp = cpu->SP; t->hl = cpu->HL; t->de = cpu->DE; t->bc = cpu->BC;
-  t->fz = cpu->F.Z; t->fn = cpu->F.N; t->fh = cpu->F.H; t->fc = cpu->F.C;
-  t->cyc = cpu->cycle;
-}
-
-static void trace_dump_last(size_t n) {
-  size_t start = (tracepos > n ? tracepos - n : 0);
-  for (size_t i = start; i < tracepos; ++i) {
-    Trace *t = &tracebuf[i & (TRACE_LEN-1)];
-    fprintf(stderr,
-      "PC=%04X OP=%02X A=%02X F=%d%d%d%d BC=%04X DE=%04X HL=%04X SP=%04X CYC=%lu\n",
-      t->pc, t->op, t->a, t->fz,t->fn,t->fh,t->fc, t->bc, t->de, t->hl, t->sp, t->cyc);
-  }
+void log_cpu(registers_t *cpu) {
+  write_log("[CPU] Dumping state\n");
+  write_log(" [*] A = 0x%02X   F = 0x%02X   BC = 0x%04X   DE = 0x%04X\n", cpu->A, cpu->F, cpu->BC, cpu->DE);
+  write_log(" [*] HL = 0x%04X   SP = 0x%04X   PC = 0x%04X\n", cpu->HL, cpu->SP, cpu->PC);
 }
 
 
-#define TICK(cpu, n) do {  \
-  (cpu)->cycle += (n);    \
-  if (!(cpu)->stopped)    \
-    tick_timers(&(cpu)->bus->timers, (n), &(cpu)->bus->IF); \
+#define TICK(cpu, n) do {                                       \
+    (cpu)->cycle += (n);                                        \
+    if (!(cpu)->stopped) {                                      \
+        tick_timers(&(cpu)->bus->timers, (n), &(cpu)->bus->IF); \
+        display_cycle((cpu)->ppu, (cpu)->bus, (n));             \
+    }                                                           \
 } while(0)
 
 
@@ -84,7 +62,9 @@ static inline void write8(registers_t *cpu, u16 addy, u8 val) {
 }
 
 static inline u16 read16(registers_t *cpu, u16 addy) {
-  return bus_read16(cpu->bus, addy);
+  uint8_t lo = read8(cpu, addy);
+  uint8_t hi = read8(cpu, addy + 1);
+  return (uint16_t)((hi << 8) | lo);
 }
 
 static inline void write16(registers_t *cpu, u16 addy, u16 val) {
@@ -92,9 +72,9 @@ static inline void write16(registers_t *cpu, u16 addy, u16 val) {
 }
 
 u8 fetch8(registers_t *cpu) {
-  //return read8(cpu, cpu->PC++);
   uint16_t pc = cpu->PC;
-  uint8_t  op = read8(cpu, pc);
+  TICK(cpu, 4);
+  uint8_t op = read8(cpu, pc);
 
   if (cpu->halt_bug) {
       cpu->halt_bug = false;
@@ -105,9 +85,12 @@ u8 fetch8(registers_t *cpu) {
 }
 
 u16 fetch16(registers_t *cpu) {
-  u16 val = read16(cpu, cpu->PC);
+  TICK(cpu, 4); 
+  uint8_t lo = read8(cpu, cpu->PC);
+  TICK(cpu, 4);  
+  uint8_t hi = read8(cpu, cpu->PC + 1);
   cpu->PC += 2; 
-  return val;
+  return (u16)((hi << 8) | lo);
 }
 
 static inline u8 read_reg8(registers_t *cpu, int reg) {
@@ -125,6 +108,7 @@ static inline u8 read_reg8(registers_t *cpu, int reg) {
     case REG_L:
       return cpu->L;
     case REG_HLm:
+      TICK(cpu, 4);
       return read8(cpu, cpu->HL);
     case REG_A:
       return cpu->A;
@@ -155,6 +139,7 @@ static inline void write_reg8(registers_t *cpu, int reg, u8 val) {
       cpu->L = val; 
       break;
     case REG_HLm:
+      TICK(cpu, 4);
       write8(cpu, cpu->HL, val);
       break;
     case REG_A:
@@ -206,22 +191,16 @@ static inline void write_reg16(registers_t *cpu, int reg ,u16 val) {
 
 // increments and decrements
 
-static inline void inc_r(registers_t* cpu) {
-  u8 opcode = read8(cpu, cpu->PC - 1);
-  int reg = (opcode >> 3) & 7;
+static inline void inc_r(registers_t *cpu) {
+  u8 op = read8(cpu, cpu->PC - 1);
+  int reg = (op >> 3) & 7;
+  u8 v = read_reg8(cpu, reg);
+  u8 res = v + 1;
+  write_reg8(cpu, reg, res);
 
-  u8 val = read_reg8(cpu, reg);
-  u8 old = val;
-
-  val++;
-
-  SET_Z(cpu, val); 
-  SET_N(cpu, 0);
-  SET_H(cpu, ((old & 0x0F) + 1) > 0x0F);
-
-  write_reg8(cpu, reg, val);
-
-  TICK(cpu, (reg == REG_HLm) ? 12 : 4);
+  cpu->F.Z = (res == 0);
+  cpu->F.N = 0;
+  cpu->F.H = ((v & 0x0F) == 0x0F); 
 }
 
 
@@ -232,7 +211,7 @@ static inline void inc_rr(registers_t *cpu) {
   u16 val = read_reg16(cpu, reg);
   val++;
   write_reg16(cpu, reg, val);
-  TICK(cpu, 8);
+  TICK(cpu, 4);
 }
 
 
@@ -241,29 +220,22 @@ static inline void dec_rr(registers_t *cpu) {
   int reg = (opcode >> 4) & 3;
 
   u16 val = read_reg16(cpu, reg);
+  
   val--;
   write_reg16(cpu, reg, val);
-  TICK(cpu, 8);
+  TICK(cpu, 4);
 }
 
-
 static inline void dec_r(registers_t *cpu) {
-  u8 opcode = read8(cpu, cpu->PC - 1);
-  int reg = (opcode >> 3) & 7;
+  u8 op = read8(cpu, cpu->PC - 1);
+  int reg = (op >> 3) & 7;
+  u8 v = read_reg8(cpu, reg);
+  u8 res = v - 1;
+  write_reg8(cpu, reg, res);
 
-  u8 val = read_reg8(cpu, reg);
-  u8 old = val;
-
-  val--;
-
-  SET_Z(cpu, val); 
-  SET_N(cpu, 1);
-  //SET_H(cpu, ((old & 0x0F) - 1) > 0x0F);
-  SET_H(cpu, (old & 0x0F) == 0);
-
-  write_reg8(cpu, reg, val);
-
-  TICK(cpu, (reg == REG_HLm) ? 12 : 4);
+  cpu->F.Z = (res == 0);
+  cpu->F.N = 1;
+  cpu->F.H = ((v & 0x0F) == 0x00); 
 }
 
 // loads
@@ -271,96 +243,89 @@ static inline void ld_r_immediate(registers_t *cpu) {
   u8 opcode = read8(cpu, cpu->PC - 1);
   int reg = (opcode >> 3) & 7;
   u8 val = fetch8(cpu); 
-
   write_reg8(cpu, reg, val);
-  TICK(cpu, (reg == REG_HLm) ? 12 : 8);
 }
 
 static inline void ld_rr_immediate(registers_t *cpu) {
   u8 opcode = read8(cpu, cpu->PC - 1);
   int reg = (opcode >> 4) & 3;
   u16 val = fetch16(cpu); 
-
   write_reg16(cpu, reg, val);
-
-  TICK(cpu, 12);
 }
 
 static inline void ld_bc_a(registers_t *cpu) {
   u16 bc = read_reg16(cpu, REG_BC);
   u8 a = read_reg8(cpu, REG_A);
-
+  TICK(cpu, 4);
   write8(cpu, bc, a);
-  TICK(cpu, 8);
 }
 
 static inline void ld_a_bc(registers_t *cpu) {
   u16 bc = read_reg16(cpu, REG_BC);
+  TICK(cpu, 4);
   u8 val = read8(cpu, bc);
-
   write_reg8(cpu, REG_A, val);
-  TICK(cpu, 8);
 }
 
 static inline void ld_a_de(registers_t *cpu) {
   u16 de = read_reg16(cpu, REG_DE);
+  TICK(cpu, 4);
   u8 val = read8(cpu, de);
-
   write_reg8(cpu, REG_A, val);
-  TICK(cpu, 8);
 }
 
 static inline void ld_de_a(registers_t *cpu) {
   u16 de = read_reg16(cpu, REG_DE);
   u8 a = read_reg8(cpu, REG_A);
-
+  TICK(cpu, 4);
   write8(cpu, de, a);
-  TICK(cpu, 8);
 }
 
 static inline void ld_a16_sp(registers_t *cpu) {
   u16 nn = fetch16(cpu);
+  TICK(cpu, 4);  
   write8(cpu, nn, cpu->SP & 0xFF);
+  TICK(cpu, 4);  
   write8(cpu, nn + 1, cpu->SP >> 8);
-  TICK(cpu, 20);
 }
 
 static inline void ld_hlp_a(registers_t *cpu) {
   u8 a = read_reg8(cpu, REG_A);
   u16 hl = read_reg16(cpu, REG_HL);
+  
   hl += 1;
+  TICK(cpu, 4);
   write8(cpu, cpu->HL, a);
   write_reg16(cpu, REG_HL, hl);
-  TICK(cpu, 8);
 }
 
 static inline void ld_hlm_a(registers_t *cpu) {
   u8 a = read_reg8(cpu, REG_A);
   u16 hl = read_reg16(cpu, REG_HL);
+  
   hl -= 1;
+  TICK(cpu, 4);
   write8(cpu, cpu->HL, a);
   write_reg16(cpu, REG_HL, hl);
-  TICK(cpu, 8);
 }
 
 static inline void ld_a_hlp(registers_t *cpu) {
   u16 hl_addy = read_reg16(cpu, REG_HL);
+  
+  TICK(cpu, 4);
   u8 hl_val = read8(cpu, hl_addy);
-
   write_reg8(cpu, REG_A, hl_val);
   write_reg16(cpu, REG_HL, hl_addy + 1);
-
-  TICK(cpu, 8);
 }
 
 static inline void ld_a_hlm(registers_t *cpu) {
   u16 hl_addy = read_reg16(cpu, REG_HL);
+  
+  
+  TICK(cpu, 4);
   u8 hl_val = read8(cpu, hl_addy);
-
   write_reg8(cpu, REG_A, hl_val);
   write_reg16(cpu, REG_HL, hl_addy - 1);
-
-  TICK(cpu, 8);
 }
 
 static inline void ld_r_r(registers_t *cpu) {
@@ -371,7 +336,6 @@ static inline void ld_r_r(registers_t *cpu) {
 
   u8 src = read_reg8(cpu, y);
   write_reg8(cpu, x, src);
-  TICK(cpu, (x == REG_HLm || y == REG_HLm) ? 8 : 4);
 }
 
 static inline void halt(registers_t *cpu) {
@@ -401,7 +365,6 @@ static inline void rlca(registers_t *cpu) {
   SET_H(cpu, 0);
   SET_C(cpu, msb);
   write_reg8(cpu, REG_A, reg);
-  TICK(cpu, 4);
 }
 
 static inline void rra(registers_t *cpu) {
@@ -415,7 +378,6 @@ static inline void rra(registers_t *cpu) {
   SET_H(cpu, 0);
   SET_C(cpu, lsb);
   write_reg8(cpu, REG_A, reg);
-  TICK(cpu, 4);
 }
 
 static inline void rla(registers_t *cpu) {
@@ -428,7 +390,6 @@ static inline void rla(registers_t *cpu) {
   SET_H(cpu, 0);
   SET_C(cpu, msb);
   write_reg8(cpu, REG_A, reg);
-  TICK(cpu, 4);
 }
 
 static inline void rrca(registers_t *cpu) {
@@ -440,7 +401,6 @@ static inline void rrca(registers_t *cpu) {
   SET_H(cpu, 0);
   SET_C(cpu, lsb);
   write_reg8(cpu, REG_A, reg);
-  TICK(cpu, 4);
 }
 
 
@@ -456,7 +416,7 @@ static inline void add_hl_rr(registers_t *cpu) {
   SET_H(cpu, ((valREG & 0x0FFF) + (valHL & 0x0FFF)) > 0x0FFF);
   SET_C(cpu, result > 0xFFFF);
   write_reg16(cpu, REG_HL, result);
-  TICK(cpu, 8);
+  TICK(cpu, 4);
 }
 
 static inline void add_r_r(registers_t *cpu) {
@@ -471,7 +431,6 @@ static inline void add_r_r(registers_t *cpu) {
   SET_H(cpu, ((a & 0x0F) + (r & 0x0F)) > 0x0F);
   SET_C(cpu, (result > 0xFF));
   write_reg8(cpu, REG_A, (u8)result);
-  TICK(cpu, (reg == REG_HLm) ? 8 : 4);
 }
 
 static inline void sub_r(registers_t *cpu) {
@@ -487,31 +446,12 @@ static inline void sub_r(registers_t *cpu) {
   SET_H(cpu, (a & 0x0F) < (r & 0x0F));
   SET_C(cpu, (a < r));
   write_reg8(cpu, REG_A, result);
-  TICK(cpu, (reg == REG_HLm) ? 8 : 4);
 }
 
-
-//static inline void sbc_r(registers_t *cpu) { 
-//  u8 opcode = read8(cpu, cpu->PC - 1); 
-//  int reg = opcode & 7; 
-//  u8 a = read_reg8(cpu, REG_A); 
-//  u8 r = read_reg8(cpu, reg); 
-//  u16 result = a - r - cpu->F.C; 
-//
-//  SET_Z(cpu, (result & 0xFF)); 
-//  SET_N(cpu, 1); 
-//  //SET_H(cpu, ((a & 0x0F) < (r & 0x0F))); 
-//  //SET_C(cpu, (a < r)); 
-//  SET_H(cpu, ((a ^ r ^ result) & 0x10) != 0);
-//  SET_C(cpu, result > 0xFF); 
-//  write_reg8(cpu, REG_A, (u8)result); 
-//
-//  TICK(cpu, (reg == REG_HLm) ? 8 : 4); 
-//}
 static inline void sbc_r(registers_t *cpu) {
   u8 opcode = read8(cpu, cpu->PC - 1);
-  int idx = opcode & 7;           // which register
-  u8 b = read_reg8(cpu, idx);     // its value
+  int idx = opcode & 7;           
+  u8 b = read_reg8(cpu, idx);     
   u8 a = cpu->A, c = cpu->F.C;
   u16 res = (u16)a - b - c;
 
@@ -521,7 +461,6 @@ static inline void sbc_r(registers_t *cpu) {
   SET_C(cpu, res > 0xFF);
 
   cpu->A = (u8)res;
-  TICK(cpu, (idx == REG_HLm) ? 8 : 4);
 }
 
 
@@ -536,7 +475,6 @@ static inline void sbc_a_u8(registers_t *cpu) {
   SET_C(cpu, (a < (imm + cpu->F.C))); 
 
   write_reg8(cpu, REG_A, (u8)result);
-  TICK(cpu, 8);
 }
 
 static inline void adc_r(registers_t *cpu) {
@@ -553,7 +491,6 @@ static inline void adc_r(registers_t *cpu) {
   SET_C(cpu, (result > 0xFF));
   
   write_reg8(cpu, REG_A, (u8)result);
-  TICK(cpu, (reg == REG_HLm) ? 8 : 4);
 }
 
 static inline void adc_u8(registers_t *cpu) {
@@ -567,12 +504,13 @@ static inline void adc_u8(registers_t *cpu) {
   SET_C(cpu, (result > 0xFF));
   
   write_reg8(cpu, REG_A, (u8)result);
-  TICK(cpu,  8);
 }
 
 // weird shit
 static inline void nop(registers_t *cpu) {
-  TICK(cpu, 4);
+}
+
+static inline void illegal_op(registers_t *cpu) {
 }
 
 static inline void stop(registers_t *cpu) {
@@ -580,7 +518,6 @@ static inline void stop(registers_t *cpu) {
   cpu->bus->timers.div_count = 0;
 
   cpu->stopped = true;
-  TICK(cpu, 4);
 }
 
 static inline void cpl(registers_t *cpu) { 
@@ -589,61 +526,34 @@ static inline void cpl(registers_t *cpu) {
 
   SET_N(cpu, 1);
   SET_H(cpu, 1);
-  TICK(cpu, 4);
 }
-
-//static inline void daa(registers_t *cpu) { 
-//  uint8_t offset = 0;
-//  uint8_t a = (uint8_t)read_reg8(cpu, REG_A);
-//  bool carry = false;
-//
-//  if (!cpu->F.N) {
-//    if (cpu->F.H || (a & 0x0F) > 0x09)  offset |= 0x06;
-//    if (cpu->F.C || (a & 0xFF) > 0x99) { offset |= 0x60; carry=true; }
-//    a += offset;
-//  } else {
-//    if (cpu->F.H) offset |= 0x06;
-//    if (cpu->F.C) offset |= 0x60;
-//    a -= offset;
-//  }
-//
-//  write_reg8(cpu, REG_A, (u8)a);
-//  SET_Z(cpu, a);
-//  SET_H(cpu, 0);
-//  SET_C(cpu, (carry == 1 ? 1 : 0));
-//
-//  TICK(cpu, 4);
-//}
 
 static inline void daa(registers_t *cpu) {
   uint8_t a = cpu->A;
   uint8_t corr = 0;
-  uint8_t newC = cpu->F.C;  // preserve by default
+  uint8_t newC = cpu->F.C;  
 
-  if (!cpu->F.N) { // after ADD/ADC
+  if (!cpu->F.N) { 
     if (cpu->F.H || (a & 0x0F) > 0x09) corr |= 0x06;
     if (cpu->F.C || a > 0x99) { corr |= 0x60; newC = 1; }
     a += corr;
-  } else {         // after SUB/SBC
+  } else {         
     if (cpu->F.H) corr |= 0x06;
     if (cpu->F.C) corr |= 0x60;
     a -= corr;
-    // newC stays whatever it was
   }
 
   cpu->A = a;
   SET_Z(cpu, a);
-  SET_N(cpu, cpu->F.N);    // unchanged
+  SET_N(cpu, cpu->F.N);    
   SET_H(cpu, 0);
   SET_C(cpu, newC);
-  TICK(cpu, 4);
 }
 
 static inline void scf(registers_t *cpu) {
   SET_C(cpu, 1);
   SET_N(cpu, 0);
   SET_H(cpu, 0);
-  TICK(cpu, 4);
 }
 
 static inline void cp_r(registers_t *cpu) {
@@ -658,7 +568,6 @@ static inline void cp_r(registers_t *cpu) {
   SET_Z(cpu, (result & 0xFF));
   SET_H(cpu, (a & 0x0F) < (r & 0x0F));
   SET_C(cpu, (a < r));
-  TICK(cpu, (reg == REG_HLm) ? 8 : 4);
 }
 
 
@@ -666,7 +575,7 @@ static inline void cp_r(registers_t *cpu) {
 static inline void jr_e(registers_t *cpu) {
   int8_t offset = (int8_t)fetch8(cpu);
   cpu->PC += offset;
-  TICK(cpu, 12);
+  TICK(cpu, 4);
 }
 
 
@@ -674,40 +583,32 @@ static inline void jr_nz(registers_t *cpu) {
   int8_t offset = (int8_t)fetch8(cpu);
   if (!cpu->F.Z) {
     cpu->PC += offset;
-    TICK(cpu, 12);
-  } else {
-    TICK(cpu, 8);
-  }
+    TICK(cpu, 4);
+  } 
 }
 
 static inline void jr_z(registers_t *cpu) {
   int8_t offset = (int8_t)fetch8(cpu);
   if (cpu->F.Z) {
     cpu->PC += offset;
-    TICK(cpu, 12);
-  } else {
-    TICK(cpu, 8);
-  }
+    TICK(cpu, 4);
+  } 
 }
 
 static inline void jr_nc(registers_t *cpu) {
   int8_t offset = (int8_t)fetch8(cpu);
   if (!cpu->F.C) {
     cpu->PC += offset;
-    TICK(cpu, 12);
-  } else {
-    TICK(cpu, 8);
-  }
+    TICK(cpu, 4);
+  } 
 }
 
 static inline void jr_c(registers_t *cpu) {
   int8_t offset = (int8_t)fetch8(cpu);
   if (cpu->F.C) {
     cpu->PC += offset;
-    TICK(cpu, 12);
-  } else {
-    TICK(cpu, 8);
-  }
+    TICK(cpu, 4);
+  } 
 }
 
 static inline void jp_nz_a16(registers_t *cpu) {
@@ -715,11 +616,8 @@ static inline void jp_nz_a16(registers_t *cpu) {
   
   if (!cpu->F.Z) {
     cpu->PC = next;
-    TICK(cpu, 16);
-  } else {
-    //cpu->PC += 3; // skip
-    TICK(cpu, 12);
-  }
+    TICK(cpu, 4);
+  } 
 }
 
 static inline void jp_nc_a16(registers_t *cpu) {
@@ -727,11 +625,8 @@ static inline void jp_nc_a16(registers_t *cpu) {
   
   if (!cpu->F.C) {
     cpu->PC = next;
-    TICK(cpu, 16);
-  } else {
-    //cpu->PC += 3; // skip
-    TICK(cpu, 12);
-  }
+    TICK(cpu, 4);
+  } 
 }
 
 static inline void jp_c_a16(registers_t *cpu) {
@@ -739,11 +634,8 @@ static inline void jp_c_a16(registers_t *cpu) {
   
   if (cpu->F.C) {
     cpu->PC = next;
-    TICK(cpu, 16);
-  } else {
-    //cpu->PC += 3; // skip
-    TICK(cpu, 12);
-  }
+    TICK(cpu, 4);
+  } 
 }
 
 static inline void jp_z_a16(registers_t *cpu) {
@@ -751,24 +643,20 @@ static inline void jp_z_a16(registers_t *cpu) {
   
   if (cpu->F.Z) {
     cpu->PC = next;
-    TICK(cpu, 16);
-  } else {
-    //cpu->PC += 3; // skip
-    TICK(cpu, 12);
-  }
+    TICK(cpu, 4);
+  } 
 }
 
 static inline void jp_a16(registers_t *cpu) {
   u16 next = fetch16(cpu);
   cpu->PC = next;
-  TICK(cpu, 16);
+  TICK(cpu, 4);
 }
 
 static inline void ccf(registers_t *cpu) {
   SET_C(cpu, !cpu->F.C);
   SET_N(cpu, 0);
   SET_H(cpu, 0);
-  TICK(cpu, 4);
 }
 
 //bit ops
@@ -785,7 +673,6 @@ static inline void and_r(registers_t *cpu) {
   SET_C(cpu, 0);
 
   write_reg8(cpu, REG_A, result);
-  TICK(cpu, (reg == REG_HLm) ? 8 : 4);
 }
 
 static inline void xor_r(registers_t *cpu) {
@@ -801,7 +688,6 @@ static inline void xor_r(registers_t *cpu) {
   SET_C(cpu, 0);
 
   write_reg8(cpu, REG_A, result);
-  TICK(cpu, (reg == REG_HLm) ? 8 : 4);
 }
 
 static inline void or_r(registers_t *cpu) { /* untested */
@@ -817,61 +703,60 @@ static inline void or_r(registers_t *cpu) { /* untested */
   SET_C(cpu, 0);
 
   write_reg8(cpu, REG_A, result);
-  TICK(cpu, (reg == REG_HLm) ? 8 : 4);
 }
 
 static inline u16 pop(registers_t *cpu) {
+  TICK(cpu, 4);  // Low byte read
   u8 lsb = read8(cpu, cpu->SP++);
+  TICK(cpu, 4);  // High byte read
   u8 msb = read8(cpu, cpu->SP++);
   return (u16)((msb << 8) | lsb);
 }
 
 static inline void ret_nz(registers_t *cpu) {
+  TICK(cpu, 4);
   if (!cpu->F.Z) {
     cpu->PC = pop(cpu);
-    TICK(cpu, 20);
-  } else {
-    TICK(cpu, 8);
+    TICK(cpu, 4);
   }
 }
 
 static inline void ret_nc(registers_t *cpu) {
+  TICK(cpu, 4);
   if (!cpu->F.C) {
     cpu->PC = pop(cpu);
-    TICK(cpu, 20);
-  } else {
-    TICK(cpu, 8);
+    TICK(cpu, 4);
   }
 }
 
 static inline void ret_z(registers_t *cpu) {
+  TICK(cpu, 4);
   if (cpu->F.Z) {
     cpu->PC = pop(cpu);
-    TICK(cpu, 20);
-  } else {
-    TICK(cpu, 8);
+    TICK(cpu, 4);
   }
 }
 
 static inline void ret_c(registers_t *cpu) {
+  TICK(cpu, 4);
   if (cpu->F.C) {
     cpu->PC = pop(cpu);
-    TICK(cpu, 20);
-  } else {
-    TICK(cpu, 8);
+    TICK(cpu, 4);
   }
 }
 
 static inline void ret(registers_t *cpu) {
     cpu->PC = pop(cpu);
-    TICK(cpu, 16);
+    TICK(cpu, 4);
 }
 
 
 static inline void push(registers_t *cpu, u16 val) {
   cpu->SP--;
+  TICK(cpu, 4);  
   write8(cpu, cpu->SP, (u8)(val >> 8));
   cpu->SP--;
+  TICK(cpu, 4); 
   write8(cpu, cpu->SP, (u8)(val & 0xFF));
 }
 
@@ -879,14 +764,13 @@ static inline void pop_rr(registers_t *cpu) {
   u8 opcode = read8(cpu, cpu->PC - 1);
   int reg = (opcode >> 4) & 3;
   write_reg16(cpu, reg, pop(cpu));
-  TICK(cpu, 12);
 }
 
 static inline void push_rr(registers_t *cpu) {
   u8 opcode = read8(cpu, cpu->PC - 1);
   int reg = (opcode >> 4) & 3;
   push(cpu, read_reg16(cpu, reg));
-  TICK(cpu, 16);
+  TICK(cpu, 4);
 }
 
 static inline void call_nz(registers_t *cpu) {
@@ -895,10 +779,8 @@ static inline void call_nz(registers_t *cpu) {
  if (!cpu->F.Z) {
    push(cpu, cpu->PC);
    cpu->PC = next;
-   TICK(cpu, 24);
- } else {
-   TICK(cpu, 12);
- }
+   TICK(cpu, 4);
+ } 
 }
 
 static inline void call_nc(registers_t *cpu) {
@@ -907,10 +789,8 @@ static inline void call_nc(registers_t *cpu) {
  if (!cpu->F.C) {
    push(cpu, cpu->PC);
    cpu->PC = next;
-   TICK(cpu, 24);
- } else {
-   TICK(cpu, 12);
- }
+   TICK(cpu, 4);
+ } 
 }
 
 static inline void call_c(registers_t *cpu) {
@@ -919,9 +799,7 @@ static inline void call_c(registers_t *cpu) {
  if (cpu->F.C) {
    push(cpu, cpu->PC);
    cpu->PC = next;
-   TICK(cpu, 24);
- } else {
-   TICK(cpu, 12);
+   TICK(cpu, 4);
  }
 }
 
@@ -931,17 +809,15 @@ static inline void call_z(registers_t *cpu) {
  if (cpu->F.Z) {
    push(cpu, cpu->PC);
    cpu->PC = next;
-   TICK(cpu, 24);
- } else {
-   TICK(cpu, 12);
- }
+   TICK(cpu, 4);
+ } 
 }
 
 static inline void call_u16(registers_t *cpu) {
    u16 next = fetch16(cpu);
    push(cpu, cpu->PC);
    cpu->PC = next;
-   TICK(cpu, 24);
+   TICK(cpu, 4);
 }
 
 static inline void add_a_imm(registers_t *cpu) {
@@ -955,7 +831,6 @@ static inline void add_a_imm(registers_t *cpu) {
   SET_H(cpu, ((a & 0x0F) + (imm & 0x0F)) > 0x0F);
   SET_C(cpu, (result > 0xFF));
   write_reg8(cpu, REG_A, (u8)result);
-  TICK(cpu, 8);
 }
 
 static inline void sub_a_imm(registers_t *cpu) {
@@ -969,7 +844,6 @@ static inline void sub_a_imm(registers_t *cpu) {
   SET_C(cpu, a < imm); 
 
   write_reg8(cpu, REG_A, (u8)result);
-  TICK(cpu, 8);
 }
 
 static inline void rst(registers_t *cpu) {
@@ -977,10 +851,31 @@ static inline void rst(registers_t *cpu) {
   u8 n = (opcode >> 3) & 7;
 
   u16 addr = n << 3;
+  
+  uint8_t dest_code = read8(cpu, addr);
+  
+  // if RST 0xFF = NOP
+  if (dest_code == 0xFF && addr < 0x0100) {
+    static int rst_warn_count = 0;
+    if (rst_warn_count < 10) {
+      write_log("[RST] WARNING: RST $%02X at PC=%04X jumping to %04X which "
+                "contains 0xFF \n",
+                opcode, cpu->PC - 1, addr);
+
+      write_log("[RST] Treating as NOP to prevent infinite loop\n");
+      rst_warn_count++;
+    }
+    TICK(cpu, 12);
+    return;
+  }
+
+  write_log(
+      "[RST] Executing RST $%02X at PC=%04X, jumping to %04X (code=%02X)\n",
+      opcode, cpu->PC - 1, addr, dest_code);
+
   push(cpu, cpu->PC);
   cpu->PC = addr;
-
-  TICK(cpu, 16);
+  TICK(cpu, 4);
 }
 
 void prefix(registers_t *cpu) {
@@ -995,20 +890,20 @@ void prefix(registers_t *cpu) {
 static inline void reti(registers_t *cpu) {
   cpu->IME = 1;
   cpu->PC = pop(cpu);
-  TICK(cpu, 16);
+  TICK(cpu, 4);
 }
 
 static inline void ldh_u8_a(registers_t *cpu) {
   u8 imm = fetch8(cpu);
   u16 addy = 0xFF00 + imm;
+  TICK(cpu, 4);
   write8(cpu, addy, read_reg8(cpu, REG_A));
-  TICK(cpu, 12);
 }
 
 static inline void ldh_c_a(registers_t *cpu) {
   u16 addy = 0xFF00 + read_reg8(cpu, REG_C);
+  TICK(cpu, 4);
   write8(cpu, addy, read_reg8(cpu, REG_A));
-  TICK(cpu, 8);
 }
 
 static inline void and_a_imm(registers_t *cpu) {
@@ -1021,8 +916,6 @@ static inline void and_a_imm(registers_t *cpu) {
   SET_N(cpu, 0);
   SET_H(cpu, 1);
   SET_C(cpu, 0);
-
-  TICK(cpu, 8);
 }
 
 static inline void add_sp_n8(registers_t *cpu) {
@@ -1040,18 +933,17 @@ static inline void add_sp_n8(registers_t *cpu) {
     SET_C(cpu, (lo + n) > 0xFF);
 
     cpu->SP = result;
-    TICK(cpu, 16);
+    TICK(cpu, 8);
 }
 
 static inline void jp_hl(registers_t *cpu) {
   cpu->PC = cpu->HL;
-  TICK(cpu, 4);
 }
 
 static inline void ld_a16_a(registers_t *cpu) {
   u16 imm = fetch16(cpu);
+  TICK(cpu, 4);
   write8(cpu, imm, read_reg8(cpu, REG_A));
-  TICK(cpu, 16);
 }
 
 static inline void xor_a_u8(registers_t *cpu) {
@@ -1065,20 +957,21 @@ static inline void xor_a_u8(registers_t *cpu) {
   SET_N(cpu, 0);
   SET_H(cpu, 0);
   SET_C(cpu, 0);
-
-  TICK(cpu, 8);
 }
 
 static inline void ldh_a_u8(registers_t *cpu) {
   u8 imm = fetch8(cpu);
   u16 addr = 0xFF00 + imm;
-  write_reg8(cpu, REG_A, read8(cpu, addr));
-  TICK(cpu, 12);
+  TICK(cpu, 4);
+  uint8_t val = read8(cpu, addr);
+  write_reg8(cpu, REG_A, val);
 }
 
 static inline void pop_af(registers_t *cpu) {
-  u8 lsb = read8(cpu, cpu->SP++);   
-  u8 msb = read8(cpu, cpu->SP++);  
+  TICK(cpu, 4);  
+  u8 lsb = read8(cpu, cpu->SP++);
+  TICK(cpu, 4);  
+  u8 msb = read8(cpu, cpu->SP++);
 
   cpu->A = msb;
 
@@ -1086,19 +979,17 @@ static inline void pop_af(registers_t *cpu) {
   cpu->F.N = (lsb >> 6) & 1;
   cpu->F.H = (lsb >> 5) & 1;
   cpu->F.C = (lsb >> 4) & 1;
-
-  TICK(cpu, 12);
 }
 
 static inline void ldh_a_c(registers_t *cpu) {
   u16 addy = 0xFF00 + read_reg8(cpu, REG_C);
-  write_reg8(cpu, REG_A, read8(cpu, addy));
-  TICK(cpu, 8);
+  TICK(cpu, 4);
+  uint8_t val = read8(cpu, addy);
+  write_reg8(cpu, REG_A, val);
 }
 
 static inline void di(registers_t *cpu) {
   cpu->IME = false;
-  TICK(cpu, 4);
 }
 
 static inline void or_a_u8(registers_t *cpu) {
@@ -1112,8 +1003,6 @@ static inline void or_a_u8(registers_t *cpu) {
   SET_N(cpu, 0);
   SET_H(cpu, 0);
   SET_C(cpu, 0);
-
-  TICK(cpu, 8);
 }
 
 static inline void push_af(registers_t *cpu) {
@@ -1123,11 +1012,12 @@ static inline void push_af(registers_t *cpu) {
          (cpu->F.C << 4);
 
   cpu->SP--;
+  TICK(cpu, 4);  
   write8(cpu, cpu->SP, cpu->A);
   cpu->SP--;
+  TICK(cpu, 4);  
   write8(cpu, cpu->SP, f);
-
-  TICK(cpu, 16);
+  TICK(cpu, 4);
 }
 
 static inline void ld_hl_sp_e8(registers_t *cpu) {
@@ -1144,24 +1034,23 @@ static inline void ld_hl_sp_e8(registers_t *cpu) {
   SET_C(cpu, (lo + n) > 0xFF);
 
   cpu->HL = result;
-  TICK(cpu, 12);
+  TICK(cpu, 4);
 }
 
 static inline void ld_sp_hl(registers_t *cpu) {
   cpu->SP = cpu->HL;
-  TICK(cpu, 8);
+  TICK(cpu, 4);
 }
 
 static inline void ld_a_a16(registers_t *cpu) {
   u16 addr = fetch16(cpu);           
-  u8 val = read8(cpu, addr);        
+  TICK(cpu, 4);
+  u8 val = read8(cpu, addr);
   write_reg8(cpu, REG_A, val);      
-  TICK(cpu, 16);
 }
 
 static inline void ei(registers_t *cpu) {
   cpu->ime_pending = true;
-  TICK(cpu, 4);
 }
 
 static inline void cp_a_u8(registers_t *cpu) {
@@ -1172,9 +1061,7 @@ static inline void cp_a_u8(registers_t *cpu) {
   SET_Z(cpu, (result & 0xFF));               
   SET_N(cpu, 1);                             
   SET_H(cpu, (a & 0x0F) < (imm & 0x0F));     
-  SET_C(cpu, a < imm);                       
-
-  TICK(cpu, 8);
+  SET_C(cpu, a < imm);
 }
 
 
@@ -1193,7 +1080,6 @@ static inline void rlc_r(registers_t *cpu) {
   SET_C(cpu, carry);
 
   write_reg8(cpu, reg, val);
-  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
 }
 
 static inline void rrc_r(registers_t *cpu) {
@@ -1210,7 +1096,6 @@ static inline void rrc_r(registers_t *cpu) {
   SET_C(cpu, carry);
 
   write_reg8(cpu, reg, val);
-  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
 }
 
 static inline void rl_r(registers_t *cpu) {
@@ -1228,7 +1113,6 @@ static inline void rl_r(registers_t *cpu) {
   SET_C(cpu, new_c);
 
   write_reg8(cpu, reg, val);
-  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
 }
 
 static inline void rr_r(registers_t *cpu) {
@@ -1246,7 +1130,6 @@ static inline void rr_r(registers_t *cpu) {
   SET_C(cpu, new_c);
 
   write_reg8(cpu, reg, val);
-  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
 }
 
 static inline void sla_r(registers_t *cpu) {
@@ -1263,7 +1146,6 @@ static inline void sla_r(registers_t *cpu) {
   SET_C(cpu, new_c);
 
   write_reg8(cpu, reg, val);
-  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
 }
 
 static inline void sra_r(registers_t *cpu) {
@@ -1281,7 +1163,6 @@ static inline void sra_r(registers_t *cpu) {
   SET_C(cpu, carry);
 
   write_reg8(cpu, reg, val);
-  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
 }
 
 static inline void swap_r(registers_t *cpu) {
@@ -1297,7 +1178,6 @@ static inline void swap_r(registers_t *cpu) {
   SET_C(cpu, 0);
 
   write_reg8(cpu, reg, val);
-  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
 }
 
 static inline void srl_r(registers_t *cpu) {
@@ -1314,7 +1194,6 @@ static inline void srl_r(registers_t *cpu) {
   SET_C(cpu, carry);
 
   write_reg8(cpu, reg, val);
-  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
 }
 
 static inline void bit_n_r(registers_t *cpu) {
@@ -1328,8 +1207,6 @@ static inline void bit_n_r(registers_t *cpu) {
   SET_Z(cpu, zero);
   SET_N(cpu, 0);
   SET_H(cpu, 1);
-
-  TICK(cpu, (reg == REG_HLm) ? 12 : 8);
 }
 
 static inline void res_n_r(registers_t *cpu) {
@@ -1340,8 +1217,6 @@ static inline void res_n_r(registers_t *cpu) {
   u8 val = read_reg8(cpu, reg);
   val &= ~(1 << bit);
   write_reg8(cpu, reg, val);
-
-  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
 }
 
 static inline void set_n_r(registers_t *cpu) {
@@ -1352,8 +1227,6 @@ static inline void set_n_r(registers_t *cpu) {
   u8 val = read_reg8(cpu, reg);
   val |= (1 << bit);
   write_reg8(cpu, reg, val);
-
-  TICK(cpu, (reg == REG_HLm) ? 16 : 8);
 }
 
 
@@ -1387,12 +1260,12 @@ void (*opcodes[256])(registers_t *cpu) = {
 
   ret_nz, pop_rr, jp_nz_a16, jp_a16, call_nz, push_rr ,add_a_imm, rst, 
   ret_z, ret, jp_z_a16, prefix, call_z, call_u16, adc_u8, rst, 
-  ret_nc, pop_rr, jp_nc_a16, NULL, call_nc, push_rr, sub_a_imm, rst,
-  ret_c, reti, jp_c_a16, NULL, call_c, NULL, sbc_a_u8, rst,
-  ldh_u8_a, pop_rr, ldh_c_a, NULL, NULL, push_rr, and_a_imm, rst,
-  add_sp_n8, jp_hl, ld_a16_a, NULL, NULL, NULL, xor_a_u8, rst,
-  ldh_a_u8, pop_af, ldh_a_c, di, NULL, push_af, or_a_u8, rst,
-  ld_hl_sp_e8, ld_sp_hl, ld_a_a16, ei, NULL, NULL, cp_a_u8, rst
+  ret_nc, pop_rr, jp_nc_a16, illegal_op, call_nc, push_rr, sub_a_imm, rst,
+  ret_c, reti, jp_c_a16, illegal_op, call_c, illegal_op, sbc_a_u8, rst,
+  ldh_u8_a, pop_rr, ldh_c_a, illegal_op, illegal_op, push_rr, and_a_imm, rst,
+  add_sp_n8, jp_hl, ld_a16_a, illegal_op, illegal_op, illegal_op, xor_a_u8, rst,
+  ldh_a_u8, pop_af, ldh_a_c, di, illegal_op, push_af, or_a_u8, rst,
+  ld_hl_sp_e8, ld_sp_hl, ld_a_a16, ei, illegal_op, illegal_op, cp_a_u8, rst
 };
 
 void (*cb_ops[256])(registers_t *cpu) = {
@@ -1433,19 +1306,9 @@ void (*cb_ops[256])(registers_t *cpu) = {
 };
 
 
-void debug_state(registers_t *cpu, u8 opcode) {
-    fprintf(stderr, "PC=%04X OP=%02X A=%02X F=%d%d%d%d BC=%04X DE=%04X HL=%04X SP=%04X CYC=%lu\n",
-        cpu->PC-1, opcode,
-        cpu->A,
-        cpu->F.Z, cpu->F.N, cpu->F.H, cpu->F.C,
-        cpu->BC, cpu->DE, cpu->HL, cpu->SP, cpu->cycle);
-    fflush(stderr);
-}
 
 void cpu_go(registers_t *cpu) {
     u8 opcode = fetch8(cpu);
-    trace_log(cpu, opcode);
-    debug_state(cpu, opcode);
     if (opcodes[opcode]) opcodes[opcode](cpu);
     else {
       exit(1);
@@ -1461,7 +1324,8 @@ void cpu_go(registers_t *cpu) {
 void RESET_CPU(registers_t *cpu) {
     memset(cpu, 0, sizeof(registers_t));
     cpu->SP = 0xFFFE;
-    cpu->PC = 0x0100;
+    cpu->PC = 0x0000;
+    cpu->IME = 0;
 }
 
 void load_rom(registers_t *cpu, const char *path) {
@@ -1479,9 +1343,17 @@ static inline bool irq_pending(registers_t* c) {
 
 void helper(registers_t *cpu) {
   if (cpu->halt) {
+    static int halt_count = 0;
+    halt_count++;
+    if (halt_count == 10000) {
+      fprintf(stderr, "[HALT] CPU halted at PC=%04X IME=%d IF=%02X IE=%02X pending=%d\n",
+              cpu->PC, cpu->IME, cpu->bus->IF, cpu->bus->IE, irq_pending(cpu));
+      halt_count = 0;
+    }
     TICK(cpu, 4);
     if (irq_pending(cpu)) {
       cpu->halt = false;
+      halt_count = 0;
       if (cpu->IME) {
 	uint8_t ticks = handle_interrupts(cpu);
 	if (ticks) {TICK(cpu, ticks); return;}
@@ -1495,8 +1367,24 @@ void helper(registers_t *cpu) {
     if (ticks) {TICK(cpu, ticks); return;}
   }
 
+  // Log transition from boot ROM to game
+  static bool was_in_bootrom = true;
+  bool in_bootrom = (cpu->PC < 0x0100) && cpu->bus->bootrom_enabled;
+  if (was_in_bootrom && !in_bootrom) {
+    write_log("[CPU] Transitioned from boot ROM to game code at PC=%04X\n",
+              cpu->PC);
+  }
+  was_in_bootrom = in_bootrom;
+
   uint8_t opcode = fetch8(cpu);
-  opcodes[opcode](cpu);          
+  
+  if (!opcodes[opcode]) {
+    write_log("[ERROR] no handler for opcode %02X at PC=%04X\n", opcode,
+              cpu->PC - 1);
+    return;
+  }
+
+opcodes[opcode](cpu);
 
   if (cpu->ime_pending) {
     cpu->IME = 1;

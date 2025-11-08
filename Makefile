@@ -1,10 +1,10 @@
 # ===== CONFIG =====
 CC      := gcc
-CFLAGS  := -std=c99 -O2 -Wall -Wextra -Iincludes
-LDFLAGS :=
+CFLAGS  := -std=c99 -O2 -Wall -Wextra -Iincludes $(shell pkg-config --cflags sdl2)
+LDFLAGS := $(shell pkg-config --libs sdl2)
 TARGET  := emulator
 
-SRCS    := main.c $(wildcard core/*.c)
+SRCS    := main.c logging.c $(wildcard core/*.c)
 OBJDIR  := build
 OBJS    := $(patsubst %.c,$(OBJDIR)/%.o,$(SRCS))
 DEPS    := $(OBJS:.o=.d)

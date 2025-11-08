@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "memory.h"
+#include "ppu.h"
 
 typedef uint16_t u16;
 typedef uint8_t u8;
@@ -18,6 +19,7 @@ typedef uint8_t u8;
 typedef struct {
 
   Bus_t *bus;
+  Ppu_t *ppu;
   u8 mem[0x10000];
 
   u8 A; 
