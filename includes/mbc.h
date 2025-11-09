@@ -36,6 +36,9 @@ typedef struct Cartridge {
   time_t rtc_last_update;
   uint32_t rtc_total_seconds;
   uint8_t rtc_latch_prev;
+
+  //cgb
+  bool is_cgb;
 } Cartridge_t;
 
 Cartridge_t *load_cart(const char *path);

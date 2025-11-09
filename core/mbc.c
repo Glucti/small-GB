@@ -111,6 +111,12 @@ Cartridge_t *load_cart(const char *path) {
   }
 
 
+  if (buf[0x143] == 0x80 || buf[0x143] == 0xC0) {
+    cart->is_cgb = true;
+  } else {
+    cart->is_cgb = false;
+  }
+
   uint8_t cart_type = buf[0x0147];
   uint8_t rom_size_code = buf[0x148];
   uint8_t ram_size_code = buf[0x149];
